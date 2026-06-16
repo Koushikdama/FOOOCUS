@@ -37,6 +37,16 @@ args_parser.parser.add_argument("--enable-auto-describe-image", action='store_tr
 args_parser.parser.add_argument("--always-download-new-model", action='store_true',
                                 help="Always download newer models", default=False)
 
+args_parser.parser.add_argument("--disable-smart-edit", action='store_true',
+                                help="Disables the Smart Edit (InstructPix2Pix) feature", default=False)
+
+args_parser.parser.add_argument("--disable-video", action='store_true',
+                                help="Disables the Video Generation feature", default=False)
+
+args_parser.parser.add_argument("--video-quality", type=str, default='480p',
+                                choices=['480p', '720p'],
+                                help="Default video generation quality (480p or 720p)")
+
 args_parser.parser.add_argument("--rebuild-hash-cache", help="Generates missing model and LoRA hashes.",
                                 type=int, nargs="?", metavar="CPU_NUM_THREADS", const=-1)
 

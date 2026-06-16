@@ -380,6 +380,83 @@ with shared.gradio_root:
                         metadata_input_image.upload(trigger_metadata_preview, inputs=metadata_input_image,
                                                     outputs=metadata_json, queue=False, show_progress=True)
 
+                    with gr.Tab(label='Smart Edit', id='smart_edit_tab') as smart_edit_tab:
+                        with gr.Row():
+                            with gr.Column():
+                                smart_edit_input_image = grh.Image(label='Upload Image to Edit', source='upload', type='numpy', show_label=True)
+                            with gr.Column():
+                                smart_edit_prompt = gr.Textbox(label='Edit Instruction', placeholder='e.g. "remove glasses and make it professional"', lines=3)
+                                smart_edit_negative_prompt = gr.Textbox(label='Negative Prompt', placeholder='What to avoid', value='low quality, blurry, distorted', lines=1)
+                                smart_edit_image_guidance = gr.Slider(label='Image Guidance Scale', info='Lower = more change, Higher = more faithful to original', minimum=0.5, maximum=3.0, step=0.1, value=1.5)
+                                smart_edit_text_guidance = gr.Slider(label='Text Guidance Scale', info='How strongly to follow the edit instruction', minimum=1.0, maximum=15.0, step=0.5, value=7.5)
+                                smart_edit_steps = gr.Slider(label='Steps', minimum=10, maximum=50, step=1, value=20)
+                                smart_edit_seed = gr.Number(label='Seed (-1 for random)', value=-1, precision=0)
+                                smart_edit_button = gr.Button(value='Apply Edit', elem_classes='type_row')
+                                smart_edit_result = grh.Image(label='Edited Result', show_label=True, interactive=False)
+                                gr.HTML('* Powered by InstructPix2Pix. Upload a photo and describe your edit.')
+
+                        def run_smart_edit_clicked(image, prompt, neg_prompt, img_guidance, txt_guidance, steps, seed):
+                            if image is None:
+                                gr.Warning('Please upload an image first.')
+                                return None
+                            if not prompt.strip():
+                                gr.Warning('Please enter an edit instruction.')
+                                return None
+
+                            task = worker.AsyncTask(args=[])
+                            task.task_type = 'smart_edit'
+                            task.smart_edit_image = image
+                            task.smart_edit_prompt = prompt
+                            task.smart_edit_negative_prompt = neg_prompt
+                            task.smart_edit_image_guidance = img_guidance
+                            task.smart_edit_text_guidance = txt_guidance
+                            task.smart_edit_steps = int(steps)
+                            task.smart_edit_seed = int(seed)
+                            task.output_format = 'png'
+
+                            import modules.async_worker as async_worker_mod
+                            async_worker_mod.async_tasks.append(task)
+
+                            import time as _time
+                            while True:
+                                _time.sleep(0.1)
+                                if len(task.yields) > 0:
+                                    flag, product = task.yields.pop(0)
+                                    if flag == 'finish':
+                                        if len(task.results) > 0:
+                                            result_path = task.results[0]
+                                            if isinstance(result_path, str):
+                                                import cv2
+                                                img = cv2.imread(result_path)
+                                                if img is not None:
+                                                    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                                        return None
+
+                        smart_edit_button.click(
+                            run_smart_edit_clicked,
+                            inputs=[smart_edit_input_image, smart_edit_prompt, smart_edit_negative_prompt,
+                                    smart_edit_image_guidance, smart_edit_text_guidance, smart_edit_steps, smart_edit_seed],
+                            outputs=[smart_edit_result],
+                            show_progress=True
+                        )
+
+                    with gr.Tab(label='Video', id='video_tab') as video_tab:
+                        with gr.Row():
+                            with gr.Column():
+                                video_input_image = grh.Image(label='Upload Image to Animate', source='upload', type='numpy', show_label=True)
+                            with gr.Column():
+                                video_prompt = gr.Textbox(label='Motion / Animation Prompt', placeholder='e.g. "the person turns their head and smiles"', lines=3)
+                                video_negative_prompt = gr.Textbox(label='Negative Prompt', value='low quality, blurry, static, frozen, jittery', lines=1)
+                                video_quality = gr.Radio(label='Video Quality', choices=['480p', '720p'], value='480p')
+                                video_duration = gr.Slider(label='Duration (seconds)', minimum=2, maximum=10, step=1, value=5)
+                                video_fps = gr.Radio(label='FPS', choices=[8, 12, 16, 24], value=16)
+                                video_guidance = gr.Slider(label='Guidance Scale', minimum=1.0, maximum=15.0, step=0.5, value=5.0)
+                                video_steps = gr.Slider(label='Steps', minimum=10, maximum=50, step=1, value=30)
+                                video_seed = gr.Number(label='Seed (-1 for random)', value=-1, precision=0)
+                                video_button = gr.Button(value='Generate Video', elem_classes='type_row')
+                                video_result = gr.Video(label='Generated Video', show_label=True, interactive=False)
+                                gr.HTML('* Powered by Wan 2.1 Image-to-Video. Upload a photo and describe the desired motion.')
+
             with gr.Row(visible=modules.config.default_enhance_checkbox) as enhance_input_panel:
                 with gr.Tabs():
                     with gr.Tab(label='Upscale or Variation'):
@@ -552,6 +629,51 @@ with shared.gradio_root:
             describe_tab.select(lambda: 'desc', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
             enhance_tab.select(lambda: 'enhance', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
             metadata_tab.select(lambda: 'metadata', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
+            smart_edit_tab.select(lambda: 'smart_edit', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
+            video_tab.select(lambda: 'video', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
+
+            def run_video_clicked(image, prompt, neg_prompt, quality, duration, fps, guidance, steps, seed):
+                if image is None:
+                    gr.Warning('Please upload an image first.')
+                    return None
+                if not prompt.strip():
+                    gr.Warning('Please enter a motion/animation prompt.')
+                    return None
+
+                task = worker.AsyncTask(args=[])
+                task.task_type = 'video'
+                task.video_image = image
+                task.video_prompt = prompt
+                task.video_negative_prompt = neg_prompt
+                task.video_quality = quality
+                task.video_duration_sec = int(duration)
+                task.video_fps = int(fps)
+                task.video_guidance_scale = guidance
+                task.video_steps = int(steps)
+                task.video_seed = int(seed)
+                task.output_format = 'png'
+
+                import modules.async_worker as async_worker_mod
+                async_worker_mod.async_tasks.append(task)
+
+                import time as _time
+                while True:
+                    _time.sleep(0.5)
+                    if len(task.yields) > 0:
+                        flag, product = task.yields.pop(0)
+                        if flag == 'finish':
+                            if len(task.results) > 0:
+                                return task.results[0]
+                            return None
+
+            video_button.click(
+                run_video_clicked,
+                inputs=[video_input_image, video_prompt, video_negative_prompt,
+                        video_quality, video_duration, video_fps, video_guidance, video_steps, video_seed],
+                outputs=[video_result],
+                show_progress=True
+            )
+
             enhance_checkbox.change(lambda x: gr.update(visible=x), inputs=enhance_checkbox,
                                         outputs=enhance_input_panel, queue=False, show_progress=False, _js=switch_js)
 

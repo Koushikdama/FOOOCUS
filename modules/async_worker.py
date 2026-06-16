@@ -20,7 +20,26 @@ class AsyncTask:
         self.last_stop = False
         self.processing = False
 
+        self.task_type = 'image'
         self.performance_loras = []
+
+        self.smart_edit_image = None
+        self.smart_edit_prompt = ''
+        self.smart_edit_negative_prompt = ''
+        self.smart_edit_image_guidance = 1.5
+        self.smart_edit_text_guidance = 7.5
+        self.smart_edit_steps = 20
+        self.smart_edit_seed = -1
+
+        self.video_image = None
+        self.video_prompt = ''
+        self.video_negative_prompt = ''
+        self.video_quality = '480p'
+        self.video_duration_sec = 5
+        self.video_fps = 16
+        self.video_guidance_scale = 5.0
+        self.video_steps = 30
+        self.video_seed = -1
 
         if len(args) == 0:
             return
@@ -1462,17 +1481,86 @@ def worker():
         stop_processing(async_task, processing_start_time)
         return
 
+    def handle_smart_edit(async_task: AsyncTask):
+        from modules.smart_edit_pipeline import run_smart_edit, unload_smart_edit_model
+        from modules.private_logger import log
+
+        processing_start_time = time.perf_counter()
+        async_task.processing = True
+
+        progressbar(async_task, 10, 'Loading Smart Edit model ...')
+
+        try:
+            result_img = run_smart_edit(
+                image=async_task.smart_edit_image,
+                prompt=async_task.smart_edit_prompt,
+                negative_prompt=async_task.smart_edit_negative_prompt,
+                image_guidance_scale=async_task.smart_edit_image_guidance,
+                guidance_scale=async_task.smart_edit_text_guidance,
+                steps=async_task.smart_edit_steps,
+                seed=async_task.smart_edit_seed,
+            )
+
+            progressbar(async_task, 90, 'Saving edited image ...')
+            d = [('Smart Edit Prompt', 'smart_edit_prompt', async_task.smart_edit_prompt)]
+            img_path = log(result_img, d, output_format=async_task.output_format)
+            async_task.results.append(img_path)
+            yield_result(async_task, img_path, 95, False, False)
+
+        finally:
+            unload_smart_edit_model()
+            stop_processing(async_task, processing_start_time)
+
+    def handle_video_generation(async_task: AsyncTask):
+        from modules.video_pipeline import generate_video, unload_video_model
+        from modules.video_config import VideoQuality
+
+        processing_start_time = time.perf_counter()
+        async_task.processing = True
+
+        quality = VideoQuality.HIGH if async_task.video_quality == '720p' else VideoQuality.STANDARD
+        num_frames = int(async_task.video_duration_sec * async_task.video_fps)
+
+        progressbar(async_task, 5, 'Loading Video Generation model ...')
+
+        try:
+            video_path = generate_video(
+                image=async_task.video_image,
+                prompt=async_task.video_prompt,
+                output_dir=modules.config.path_video_outputs,
+                negative_prompt=async_task.video_negative_prompt,
+                quality=quality,
+                num_frames=num_frames,
+                fps=async_task.video_fps,
+                guidance_scale=async_task.video_guidance_scale,
+                steps=async_task.video_steps,
+                seed=async_task.video_seed,
+            )
+
+            progressbar(async_task, 95, 'Video saved!')
+            async_task.results.append(video_path)
+            yield_result(async_task, video_path, 95, False, False)
+
+        finally:
+            unload_video_model()
+            stop_processing(async_task, processing_start_time)
+
     while True:
         time.sleep(0.01)
         if len(async_tasks) > 0:
             task = async_tasks.pop(0)
 
             try:
-                handler(task)
-                if task.generate_image_grid:
-                    build_image_wall(task)
+                if task.task_type == 'smart_edit':
+                    handle_smart_edit(task)
+                elif task.task_type == 'video':
+                    handle_video_generation(task)
+                else:
+                    handler(task)
+                    if task.generate_image_grid:
+                        build_image_wall(task)
+                    pipeline.prepare_text_encoder(async_call=True)
                 task.yields.append(['finish', task.results])
-                pipeline.prepare_text_encoder(async_call=True)
             except:
                 traceback.print_exc()
                 task.yields.append(['finish', task.results])
