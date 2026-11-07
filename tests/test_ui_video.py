@@ -60,13 +60,28 @@ class TestUiVideoHelpers(unittest.TestCase):
             ui_video.bind_events(ctrls, generate_button)
         self.assertEqual(ctrls['target'].value, '4K')
         self.assertEqual(ctrls['codec'].value, 'h264')
-        self.assertIn('realesr-general-x4v3.pth', ctrls['model'].choices)
+        import importlib.util
+        if importlib.util.find_spec('torch') is not None:   # model listing needs the SR backend
+            self.assertIn('realesr-general-x4v3.pth', ctrls['model'].choices)
+        self.assertIn('path', ctrls)
 
     def test_run_without_video_reports_error(self):
-        outputs = list(ui_video.run_video_upscale(None, 'm', '4K', 'wavelet', 0.25, False, 0.7, 'h264', 18))
+        outputs = list(ui_video.run_video_upscale(None, '', 'm', '4K', 'wavelet', 0.25, False, 0.7, 'h264', 18))
         self.assertEqual(len(outputs), 1)
         self.assertEqual(len(outputs[0]), 5)
         self.assertIn('upload a video', outputs[0][0]['value'])
+        missing = list(ui_video.run_video_upscale(None, '/no/such/file.mp4', 'm', '4K', 'wavelet', 0.25, False, 0.7,
+                                                  'h264', 18))
+        self.assertIn('not found', missing[0][0]['value'])
+
+    def test_resolve_input_path(self):
+        class Upload:
+            name = '/tmp/uploaded.mp4'
+        self.assertEqual(ui_video.resolve_input_path(Upload(), ''), '/tmp/uploaded.mp4')
+        self.assertEqual(ui_video.resolve_input_path(Upload(), ' /data/clip.mp4 '), '/data/clip.mp4')
+        self.assertEqual(ui_video.resolve_input_path('/tmp/a.mp4', None), '/tmp/a.mp4')
+        self.assertEqual(ui_video.resolve_input_path({'name': '/tmp/b.mp4'}, ''), '/tmp/b.mp4')
+        self.assertEqual(ui_video.resolve_input_path(None, ''), '')
 
     @unittest.skipUnless(os.environ.get('FOOOCUS_TEST_SR_MODEL') and shutil.which('ffmpeg'),
                          'set FOOOCUS_TEST_SR_MODEL=/path/to/model.pth to run the end-to-end UI test')
@@ -78,7 +93,7 @@ class TestUiVideoHelpers(unittest.TestCase):
         modules.config.path_outputs = tmp
         try:
             clip = video_io.make_synthetic_video(os.path.join(tmp, 'in.mp4'), 96, 64, 5, 10, audio=True)
-            outputs = list(ui_video.run_video_upscale(clip, os.environ['FOOOCUS_TEST_SR_MODEL'], '2x', 'wavelet',
+            outputs = list(ui_video.run_video_upscale(None, clip, os.environ['FOOOCUS_TEST_SR_MODEL'], '2x', 'wavelet',
                                                       0.25, False, 0.7, 'h264', 20))
             final = outputs[-1]
             self.assertEqual(final[0]['visible'], False)              # progress hidden

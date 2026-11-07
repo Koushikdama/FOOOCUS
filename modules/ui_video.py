@@ -86,7 +86,12 @@ def build_video_tab():
     with gr.Tab(label='Video Upscale', id='video_upscale_tab') as video_tab:
         with gr.Row():
             with gr.Column():
-                video_input = gr.Video(label='Video', source='upload', format=None, show_label=False, interactive=True)
+                # gr.File instead of gr.Video: the video component decodes the whole file in the browser for a
+                # preview, which crashes the tab ("Aw, Snap") for large videos.
+                video_input = gr.File(label='Video file', file_types=['video'], file_count='single', interactive=True)
+                video_path_box = gr.Textbox(label='...or path of a video already on the server',
+                                            placeholder='/content/drive/MyDrive/clip.mp4  (for large files: upload via the Colab file sidebar or Google Drive)',
+                                            lines=1)
                 video_info = gr.HTML(value='', elem_id='video_probe_info')
                 video_progress = gr.HTML(value='', visible=False, elem_classes='progress-bar')
                 video_preview = grh.Image(label='Frame Preview', show_label=True, visible=False, interactive=False)
@@ -123,7 +128,7 @@ def build_video_tab():
                         '\U0001F4D4 Documentation</a>')
 
     components = dict(
-        tab=video_tab, input=video_input, info=video_info, progress=video_progress, preview=video_preview,
+        tab=video_tab, input=video_input, path=video_path_box, info=video_info, progress=video_progress, preview=video_preview,
         output=video_output, file=video_file, download_html=video_download_html,
         model=video_model, model_refresh=video_model_refresh, target=video_target, color_fix=video_color_fix,
         temporal_blend=video_temporal_blend, face_enhance=video_face_enhance, face_strength=video_face_strength,
@@ -133,14 +138,30 @@ def build_video_tab():
 
 # ----------------------------------------------------------------------------- handlers
 
-def trigger_video_probe(video_path, target, codec, crf):
+def resolve_input_path(upload, path_text) -> str:
+    """The server path typed by the user wins; otherwise the uploaded file (gr.File object or path)."""
+    if path_text and str(path_text).strip():
+        return os.path.expanduser(str(path_text).strip())
+    if upload is None:
+        return ''
+    if isinstance(upload, (list, tuple)):
+        upload = upload[0] if upload else None
+    if isinstance(upload, dict):
+        return str(upload.get('name') or upload.get('path') or '')
+    return str(getattr(upload, 'name', upload) or '')
+
+
+def trigger_video_probe(upload, path_text, target, codec, crf):
+    video_path = resolve_input_path(upload, path_text)
     if not video_path:
         return gr.update(value='')
     if not ffmpeg_available():
         return gr.update(value=make_error_html(FFMPEG_MISSING))
+    if not os.path.isfile(video_path):
+        return gr.update(value=make_error_html(f'File not found on the server: {video_path}'))
     try:
         from modules.video_upscaler import compute_target
-        info = probe_video(str(video_path))
+        info = probe_video(video_path)
         out_w, out_h, run_sr = compute_target(info.width, info.height, target)
         size_mb = estimate_output_size_mb(out_w, out_h, info.fps, info.duration, codec, crf)
         return gr.update(value=format_probe_html(info, out_w, out_h, run_sr, size_mb))
@@ -154,8 +175,9 @@ def stop_video_clicked():
     return gr.update(interactive=False)
 
 
-def run_video_upscale(video_path, model_name, target, color_fix, temporal_blend,
+def run_video_upscale(upload, path_text, model_name, target, color_fix, temporal_blend,
                       face_enhance, face_strength, codec, crf):
+    video_path = resolve_input_path(upload, path_text)
     # outputs = [progress, preview, output video, download file, download link]
     def ui(progress=None, preview=None, output=None, file=None, link=None):
         return (progress if progress is not None else gr.update(),
@@ -167,8 +189,11 @@ def run_video_upscale(video_path, model_name, target, color_fix, temporal_blend,
     def error(text):
         return ui(progress=gr.update(visible=True, value=make_error_html(text)), preview=gr.update(visible=False))
 
-    if not video_path or not os.path.exists(str(video_path)):
-        yield error('Please upload a video first.')
+    if not video_path:
+        yield error('Please upload a video first (or enter the path of a video on the server).')
+        return
+    if not os.path.isfile(video_path):
+        yield error(f'File not found on the server: {video_path}')
         return
     if not ffmpeg_available():
         yield error(FFMPEG_MISSING)
@@ -202,7 +227,7 @@ def run_video_upscale(video_path, model_name, target, color_fix, temporal_blend,
                 face_enhance=bool(face_enhance), face_strength=float(face_strength), codec=codec, crf=int(crf),
                 preset=modules.config.default_video_encoder_preset,
                 fp16=None if modules.config.default_video_fp16 else False)
-            result['path'] = upscale_video(str(video_path), output_path, options,
+            result['path'] = upscale_video(video_path, output_path, options,
                                            progress_cb=progress_cb, should_stop=_cancel_event.is_set)
         except VideoUpscaleCancelled:
             result['cancelled'] = True
@@ -265,9 +290,11 @@ def bind_events(c: dict, generate_button):
     c['model_refresh'].click(lambda: gr.update(choices=list_video_models()), outputs=c['model'],
                              queue=False, show_progress=False)
 
-    probe_inputs = [c['input'], c['target'], c['codec'], c['crf']]
+    probe_inputs = [c['input'], c['path'], c['target'], c['codec'], c['crf']]
     c['input'].upload(trigger_video_probe, inputs=probe_inputs, outputs=c['info'], queue=False, show_progress=False)
-    c['input'].clear(lambda: gr.update(value=''), outputs=c['info'], queue=False, show_progress=False)
+    c['input'].clear(trigger_video_probe, inputs=probe_inputs, outputs=c['info'], queue=False, show_progress=False)
+    c['path'].submit(trigger_video_probe, inputs=probe_inputs, outputs=c['info'], queue=False, show_progress=False)
+    c['path'].blur(trigger_video_probe, inputs=probe_inputs, outputs=c['info'], queue=False, show_progress=False)
     for component in (c['target'], c['codec'], c['crf']):
         component.change(trigger_video_probe, inputs=probe_inputs, outputs=c['info'], queue=False, show_progress=False)
 
@@ -275,7 +302,7 @@ def bind_events(c: dict, generate_button):
                             gr.update(interactive=False)),
                    outputs=[c['btn'], c['stop_btn'], generate_button], queue=False, show_progress=False) \
         .then(run_video_upscale,
-              inputs=[c['input'], c['model'], c['target'], c['color_fix'], c['temporal_blend'],
+              inputs=[c['input'], c['path'], c['model'], c['target'], c['color_fix'], c['temporal_blend'],
                       c['face_enhance'], c['face_strength'], c['codec'], c['crf']],
               outputs=[c['progress'], c['preview'], c['output'], c['file'], c['download_html']],
               show_progress=False, queue=True) \

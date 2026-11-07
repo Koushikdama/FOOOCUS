@@ -439,6 +439,8 @@ Applies a LoRA to the prompt. The LoRA file must be located in the `models/loras
 
 `Input Image -> Video Upscale` upscales a video frame by frame with a super-resolution model, keeps the original audio, and writes an H.264 (plays in the browser) or 10-bit H.265 file to the `outputs` folder. It needs the `ffmpeg` and `ffprobe` programs on your PATH (`winget install ffmpeg`, `brew install ffmpeg` or `apt-get install -y ffmpeg`; Colab and the Docker image already have them).
 
+Upload the video with the file box, or — for large files — put it on the machine running Fooocus (on Colab: the file sidebar, or a mounted Google Drive) and type its path into the "path of a video already on the server" box.
+
 What happens to each frame:
 
 1. **Super-resolution** with the selected model, tiled so it fits in VRAM (tiles shrink automatically on out-of-memory).
