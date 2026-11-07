@@ -25,3 +25,7 @@ segment_anything==1.0
 diffusers>=0.31.0
 imageio[ffmpeg]>=2.34.0
 imageio-ffmpeg>=0.5.1
+fastapi==0.112.4
+starlette==0.38.6
+pydantic==2.8.2
+uvicorn==0.30.6
