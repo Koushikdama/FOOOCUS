@@ -4,6 +4,7 @@
 * Add `video_upscale.py` command line script for the same pipeline (useful on Colab)
 * Add config keys `default_video_*`, `path_face_restoration` and argument `--disable-video-upscale`
 * Add `ffmpeg` to the Docker image; the Video Upscale feature needs the `ffmpeg` binary on PATH
+* Colab notebook now runs Fooocus in a Python 3.10 environment (Colab's default Python 3.13 cannot install the pinned packages)
 
 # [2.5.5](https://github.com/lllyasviel/Fooocus/releases/tag/v2.5.5)
 
