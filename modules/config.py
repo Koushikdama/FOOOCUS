@@ -204,6 +204,7 @@ path_sam = get_dir_or_set_default('path_sam', '../models/sam/')
 path_smart_edit = get_dir_or_set_default('path_smart_edit', '../models/smart_edit/')
 path_video_models = get_dir_or_set_default('path_video_models', '../models/video/')
 path_video_outputs = get_dir_or_set_default('path_video_outputs', '../outputs/videos/', make_directory=True)
+path_face_restoration = get_dir_or_set_default('path_face_restoration', '../models/face_restoration/')
 path_outputs = get_path_output()
 
 
@@ -721,6 +722,66 @@ default_describe_content_type = get_config_item_or_set_default(
     validator=lambda x: all(k in modules.flags.describe_types for k in x),
     expected_type=list
 )
+default_video_upscale_model = get_config_item_or_set_default(
+    key='default_video_upscale_model',
+    default_value='realesr-general-x4v3.pth',
+    validator=lambda x: isinstance(x, str),
+    expected_type=str
+)
+default_video_upscale_target = get_config_item_or_set_default(
+    key='default_video_upscale_target',
+    default_value='4K',
+    validator=lambda x: x in modules.flags.video_upscale_targets,
+    expected_type=str
+)
+default_video_color_fix = get_config_item_or_set_default(
+    key='default_video_color_fix',
+    default_value='wavelet',
+    validator=lambda x: x in modules.flags.video_color_fix_options,
+    expected_type=str
+)
+default_video_temporal_blend = get_config_item_or_set_default(
+    key='default_video_temporal_blend',
+    default_value=0.25,
+    validator=lambda x: isinstance(x, numbers.Number) and 0 <= x <= 1,
+    expected_type=numbers.Number
+)
+default_video_face_enhance = get_config_item_or_set_default(
+    key='default_video_face_enhance',
+    default_value=False,
+    validator=lambda x: isinstance(x, bool),
+    expected_type=bool
+)
+default_video_face_strength = get_config_item_or_set_default(
+    key='default_video_face_strength',
+    default_value=0.7,
+    validator=lambda x: isinstance(x, numbers.Number) and 0 <= x <= 1,
+    expected_type=numbers.Number
+)
+default_video_codec = get_config_item_or_set_default(
+    key='default_video_codec',
+    default_value='h264',
+    validator=lambda x: x in modules.flags.video_codecs,
+    expected_type=str
+)
+default_video_crf = get_config_item_or_set_default(
+    key='default_video_crf',
+    default_value=18,
+    validator=lambda x: isinstance(x, int) and 0 <= x <= 51,
+    expected_type=int
+)
+default_video_encoder_preset = get_config_item_or_set_default(
+    key='default_video_encoder_preset',
+    default_value='fast',
+    validator=lambda x: x in ['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'slower', 'veryslow'],
+    expected_type=str
+)
+default_video_fp16 = get_config_item_or_set_default(
+    key='default_video_fp16',
+    default_value=True,
+    validator=lambda x: isinstance(x, bool),
+    expected_type=bool
+)
 
 config_dict["default_loras"] = default_loras = default_loras[:default_max_lora_number] + [[True, 'None', 1.0] for _ in range(default_max_lora_number - len(default_loras))]
 
@@ -951,6 +1012,25 @@ def downloading_upscale_model():
         file_name='fooocus_upscaler_s409985e5.bin'
     )
     return os.path.join(path_upscale_models, 'fooocus_upscaler_s409985e5.bin')
+
+
+def downloading_realesr_general_x4v3():
+    load_file_from_url(
+        url='https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth',
+        model_dir=path_upscale_models,
+        file_name='realesr-general-x4v3.pth'
+    )
+    return os.path.join(path_upscale_models, 'realesr-general-x4v3.pth')
+
+
+def downloading_gfpgan_model():
+    load_file_from_url(
+        url='https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth',
+        model_dir=path_face_restoration,
+        file_name='GFPGANv1.4.pth'
+    )
+    return os.path.join(path_face_restoration, 'GFPGANv1.4.pth')
+
 
 def downloading_safety_checker_model():
     load_file_from_url(

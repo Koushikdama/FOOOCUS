@@ -44,6 +44,7 @@ Below is a quick list using Midjourney's examples:
 | --ar | Advanced -> Aspect Ratios |
 | InsightFace | Input Image -> Image Prompt -> Advanced -> FaceSwap |
 | Describe | Input Image -> Describe |
+| Video Upscale | Input Image -> Video Upscale <br> (Frame-by-frame upscaling to 4K / 1080p / 2x / 4x with color preservation, flicker reduction and optional GFPGAN face restoration. Needs the `ffmpeg` binary, see [Video Upscale](#video-upscale).) |
 
 Below is a quick list using LeonardoAI's examples:
 
@@ -328,6 +329,7 @@ For example, an edited `Fooocus\config.txt` (this file will be generated after t
     "path_inpaint": "D:\\Fooocus\\models\\inpaint",
     "path_controlnet": "D:\\Fooocus\\models\\controlnet",
     "path_clip_vision": "D:\\Fooocus\\models\\clip_vision",
+    "path_face_restoration": "D:\\Fooocus\\models\\face_restoration",
     "path_fooocus_expansion": "D:\\Fooocus\\models\\prompt_expansion\\fooocus_expansion",
     "path_outputs": "D:\\Fooocus\\outputs",
     "default_model": "realisticStockPhoto_v10.safetensors",
@@ -390,6 +392,7 @@ entry_with_update.py  [-h] [--listen [IP]] [--port PORT]
                       [--disable-metadata] [--disable-preset-download]
                       [--disable-enhance-output-sorting]
                       [--enable-auto-describe-image]
+                      [--disable-video-upscale]
                       [--always-download-new-model]
                       [--rebuild-hash-cache [CPU_NUM_THREADS]]
 ```
@@ -431,6 +434,35 @@ Applies a LoRA to the prompt. The LoRA file must be located in the `models/loras
 ## Advanced Features
 
 [Click here to browse the advanced features.](https://github.com/lllyasviel/Fooocus/discussions/117)
+
+## Video Upscale
+
+`Input Image -> Video Upscale` upscales a video frame by frame with a super-resolution model, keeps the original audio, and writes an H.264 (plays in the browser) or 10-bit H.265 file to the `outputs` folder. It needs the `ffmpeg` and `ffprobe` programs on your PATH (`winget install ffmpeg`, `brew install ffmpeg` or `apt-get install -y ffmpeg`; Colab and the Docker image already have them).
+
+What happens to each frame:
+
+1. **Super-resolution** with the selected model, tiled so it fits in VRAM (tiles shrink automatically on out-of-memory).
+2. **Resize** to the target (`4K` fits 3840x2160, `1080p` fits 1920x1080, `2x`/`4x` are fixed factors).
+3. **Color Fix** (`wavelet`, default) takes the detail from the upscaled frame but the colors from the original, so nothing shifts. `adain` only matches mean/contrast; `none` disables it.
+4. **Face Enhance** (optional) restores faces with GFPGAN v1.4; the strength slider blends the restored face with the original.
+5. **Temporal Blend** smooths still areas with the previous frame to remove the flicker that per-frame upscaling causes; moving areas and scene cuts are left alone.
+
+Models: the dropdown lists the built-in ones plus every `.pth`/`.safetensors` file in `models/upscale_models` (ESRGAN/Real-ESRGAN, Real-ESRGAN Compact, SwinIR, Swin2SR, HAT, DAT, OmniSR, SCUNet and similar models from [OpenModelDB](https://openmodeldb.info/) work).
+
+| Model | Speed (1080p frame, T4) | Notes |
+|-|-|-|
+| `realesr-general-x4v3.pth` (default, downloaded on first use) | ~0.3-0.6 s | Real-ESRGAN Compact, made for video |
+| `fooocus_upscaler_s409985e5.bin` | ~8-12 s | the ESRGAN model Fooocus uses for images; highest quality, very slow |
+| `RealESRGAN_x2plus.pth` (optional download) | ~2-3 s | 2x model: ideal for 1080p -> 4K |
+
+The same pipeline is available from the command line, which is convenient on Colab:
+
+```
+python video_upscale.py input.mp4 --out output.mp4 --target 4K --tile 0 --preset fast --face-enhance -- --always-high-vram
+python video_upscale.py --list-models
+```
+
+Flags after `--` go to Fooocus itself. HDR (PQ/HLG) sources are not supported yet; tone-map them to SDR first. Related config keys: `default_video_upscale_model`, `default_video_upscale_target`, `default_video_color_fix`, `default_video_temporal_blend`, `default_video_face_enhance`, `default_video_face_strength`, `default_video_codec`, `default_video_crf`, `default_video_encoder_preset`, `default_video_fp16`, `path_face_restoration`. Use `--disable-video-upscale` to hide the tab.
 
 ## Forks
 

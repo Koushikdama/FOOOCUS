@@ -3,7 +3,7 @@ ENV DEBIAN_FRONTEND noninteractive
 ENV CMDARGS --listen
 
 RUN apt-get update -y && \
-	apt-get install -y curl libgl1 libglib2.0-0 python3-pip python-is-python3 git && \
+	apt-get install -y curl libgl1 libglib2.0-0 python3-pip python-is-python3 git ffmpeg && \
 	apt-get clean && \
 	rm -rf /var/lib/apt/lists/*
 

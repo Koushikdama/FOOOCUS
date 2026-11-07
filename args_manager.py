@@ -34,6 +34,9 @@ args_parser.parser.add_argument("--disable-enhance-output-sorting", action='stor
 args_parser.parser.add_argument("--enable-auto-describe-image", action='store_true',
                                 help="Enables automatic description of uov and enhance image when prompt is empty", default=False)
 
+args_parser.parser.add_argument("--disable-video-upscale", action='store_true',
+                                help="Hides the Video Upscale tab.", default=False)
+
 args_parser.parser.add_argument("--always-download-new-model", action='store_true',
                                 help="Always download newer models", default=False)
 

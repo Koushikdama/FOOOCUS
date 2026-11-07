@@ -176,3 +176,17 @@ Please remove these flags if you are mislead by some wrong tutorials. In most ca
 ### Fooocus suddenly becomes very slow and I have not changed anything
 
 Are you accidentally running two Fooocus at the same time?
+
+### Video Upscale says "ffmpeg/ffprobe not found on PATH"
+
+The Video Upscale tab and `video_upscale.py` use the `ffmpeg` and `ffprobe` programs to read and write video files. Install them and restart Fooocus:
+
+* Windows: `winget install ffmpeg` (or download a build from https://www.gyan.dev/ffmpeg/builds/ and add its `bin` folder to PATH)
+* macOS: `brew install ffmpeg`
+* Linux / Docker / Colab: `apt-get install -y ffmpeg` (Colab and the Fooocus Docker image already include it)
+
+Check with `ffmpeg -version` in a terminal.
+
+### Video Upscale is very slow
+
+The bundled `fooocus_upscaler_s409985e5.bin` is a large ESRGAN model: expect 8-12 seconds per 1080p frame even on a fast GPU. The default `realesr-general-x4v3.pth` (Real-ESRGAN Compact) is about 20x faster and is the right choice for video. For 1080p sources, a 2x model such as `RealESRGAN_x2plus.pth` placed in `models/upscale_models/` avoids upscaling 4x and then downscaling. Encoding 4K video is CPU-bound: the `default_video_encoder_preset` config key (default `fast`) trades file size for speed.

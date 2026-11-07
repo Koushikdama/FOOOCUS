@@ -68,7 +68,11 @@ default_vae = 'Default (model)'
 refiner_swap_method = 'joint'
 
 default_input_image_tab = 'uov_tab'
-input_image_tab_ids = ['uov_tab', 'ip_tab', 'inpaint_tab', 'describe_tab', 'enhance_tab', 'metadata_tab', 'smart_edit_tab', 'video_tab']
+input_image_tab_ids = ['uov_tab', 'ip_tab', 'inpaint_tab', 'describe_tab', 'enhance_tab', 'metadata_tab', 'smart_edit_tab', 'video_tab', 'video_upscale_tab']
+
+video_upscale_targets = ['4K', '1080p', '2x', '4x']
+video_color_fix_options = ['wavelet', 'adain', 'none']
+video_codecs = ['h264', 'h265']
 
 cn_ip = "ImagePrompt"
 cn_ip_face = "FaceSwap"

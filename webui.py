@@ -13,6 +13,7 @@ import modules.flags as flags
 import modules.gradio_hijack as grh
 import modules.style_sorter as style_sorter
 import modules.meta_parser
+import modules.ui_video
 import args_manager
 import copy
 import launch
@@ -203,8 +204,12 @@ with shared.gradio_root:
                 input_image_checkbox = gr.Checkbox(label='Input Image', value=modules.config.default_image_prompt_checkbox, container=False, elem_classes='min_check')
                 enhance_checkbox = gr.Checkbox(label='Enhance', value=modules.config.default_enhance_checkbox, container=False, elem_classes='min_check')
                 advanced_checkbox = gr.Checkbox(label='Advanced', value=modules.config.default_advanced_checkbox, container=False, elem_classes='min_check')
+            video_upscale_enabled = not args_manager.args.disable_video_upscale
+            selected_input_tab = modules.config.default_selected_image_input_tab_id
+            if not video_upscale_enabled and selected_input_tab == 'video_upscale_tab':
+                selected_input_tab = flags.default_input_image_tab
             with gr.Row(visible=modules.config.default_image_prompt_checkbox) as image_input_panel:
-                with gr.Tabs(selected=modules.config.default_selected_image_input_tab_id):
+                with gr.Tabs(selected=selected_input_tab):
                     with gr.Tab(label='Upscale or Variation', id='uov_tab') as uov_tab:
                         with gr.Row():
                             with gr.Column():
@@ -456,6 +461,8 @@ with shared.gradio_root:
                                 video_button = gr.Button(value='Generate Video', elem_classes='type_row')
                                 video_result = gr.Video(label='Generated Video', show_label=True, interactive=False)
                                 gr.HTML('* Powered by Wan 2.1 Image-to-Video. Upload a photo and describe the desired motion.')
+                    if video_upscale_enabled:
+                        video_upscale_tab, video_upscale_ctrls = modules.ui_video.build_video_tab()
 
             with gr.Row(visible=modules.config.default_enhance_checkbox) as enhance_input_panel:
                 with gr.Tabs():
@@ -674,6 +681,8 @@ with shared.gradio_root:
                 show_progress=True
             )
 
+            if video_upscale_enabled:
+                video_upscale_tab.select(lambda: 'video_upscale', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
             enhance_checkbox.change(lambda x: gr.update(visible=x), inputs=enhance_checkbox,
                                         outputs=enhance_input_panel, queue=False, show_progress=False, _js=switch_js)
 
@@ -1213,6 +1222,9 @@ with shared.gradio_root:
                            outputs=[prompt, style_selections], show_progress=True, queue=True) \
             .then(fn=style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False) \
             .then(lambda: None, _js='()=>{refresh_style_localization();}')
+
+        if video_upscale_enabled:
+            modules.ui_video.bind_events(video_upscale_ctrls, generate_button)
 
         if args_manager.args.enable_auto_describe_image:
             def trigger_auto_describe(mode, img, prompt, apply_styles):

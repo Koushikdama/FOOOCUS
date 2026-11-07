@@ -123,6 +123,8 @@ Docker specified environments are there. They are used by 'entrypoint.sh'
 You can also use the same json key names and values explained in the 'config_modification_tutorial.txt' as the environments.
 See examples in the [docker-compose.yml](docker-compose.yml)
 
+The image includes `ffmpeg`, which the Video Upscale tab needs. Upscaled videos are written to `/content/data/outputs` like images.
+
 ## Notes
 
 - Please keep 'path_outputs' under '/content/app'. Otherwise, you may get an error when you open the history log.

@@ -1,3 +1,10 @@
+# 2.6.0
+
+* Add Video Upscale tab (Input Image -> Video Upscale): frame-by-frame super-resolution to 4K / 1080p / 2x / 4x with wavelet color fix, motion-aware temporal blending and optional GFPGAN face restoration, see [readme](readme.md#video-upscale)
+* Add `video_upscale.py` command line script for the same pipeline (useful on Colab)
+* Add config keys `default_video_*`, `path_face_restoration` and argument `--disable-video-upscale`
+* Add `ffmpeg` to the Docker image; the Video Upscale feature needs the `ffmpeg` binary on PATH
+
 # [2.5.5](https://github.com/lllyasviel/Fooocus/releases/tag/v2.5.5)
 
 * Fix colab inpaint issue by moving an import statement
