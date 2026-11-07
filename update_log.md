@@ -5,6 +5,7 @@
 * Add config keys `default_video_*`, `path_face_restoration` and argument `--disable-video-upscale`
 * Add `ffmpeg` to the Docker image; the Video Upscale feature needs the `ffmpeg` binary on PATH
 * Colab notebook now runs Fooocus in a Python 3.10 environment (Colab's default Python 3.13 cannot install the pinned packages)
+* Colab notebook prints a Colab proxy URL next to the gradio.live link (the share tunnel sometimes answers page requests with an HTML error page)
 * Pin fastapi, starlette, pydantic and uvicorn to versions compatible with gradio 3.41.2 (newer starlette breaks page rendering with "unhashable type: 'dict'")
 
 # [2.5.5](https://github.com/lllyasviel/Fooocus/releases/tag/v2.5.5)

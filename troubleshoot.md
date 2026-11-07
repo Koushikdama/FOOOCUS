@@ -190,3 +190,7 @@ Check with `ffmpeg -version` in a terminal.
 ### Video Upscale is very slow
 
 The bundled `fooocus_upscaler_s409985e5.bin` is a large ESRGAN model: expect 8-12 seconds per 1080p frame even on a fast GPU. The default `realesr-general-x4v3.pth` (Real-ESRGAN Compact) is about 20x faster and is the right choice for video. For 1080p sources, a 2x model such as `RealESRGAN_x2plus.pth` placed in `models/upscale_models/` avoids upscaling 4x and then downscaling. Encoding 4K video is CPU-bound: the `default_video_encoder_preset` config key (default `fast`) trades file size for speed.
+
+### On Colab the page shows a red "Error: Unexpected token '<', "<!DOCTYPE "... is not valid JSON" box
+
+This comes from the `gradio.live` share tunnel, not from Fooocus: one of the page's start-up requests was answered by the tunnel with an HTML error page instead of JSON (Gradio 3.41 then shows the parse error). The server itself is fine; the only effect is that one cosmetic page-load update is skipped. Close the box and continue, or use the Colab proxy URL that the notebook prints after `App started successful` (it is routed through Google's infrastructure and does not have this problem).
