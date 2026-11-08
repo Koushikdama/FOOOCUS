@@ -47,11 +47,18 @@ def estimate_output_size_mb(width: int, height: int, fps: float, duration: float
     return width * height * float(fps) * float(duration or 0) * bits_per_pixel / 8 / 1e6
 
 
-def format_probe_html(info, out_w: int, out_h: int, run_sr: bool, size_mb: float) -> str:
-    total = info.estimated_total_frames
-    duration = f'{info.duration:.1f} s' if info.duration else '? s'
-    text = (f'{info.width}x{info.height} @ {float(info.fps):.2f} fps, {total if total else "?"} frames, {duration}'
+def format_probe_html(info, out_w: int, out_h: int, run_sr: bool, size_mb: float,
+                      start: float = 0.0, duration=None) -> str:
+    total = info.estimated_frames(start, duration)
+    seconds = info.trimmed_duration(start, duration)
+    duration_text = f'{seconds:.1f} s' if seconds is not None else '? s'
+    source = f'{info.width}x{info.height}'
+    if info.has_non_square_pixels:
+        source = f'{info.stored_width}x{info.stored_height} (non-square pixels, processed as {source})'
+    text = (f'{source} @ {float(info.fps):.2f} fps, {total if total else "?"} frames, {duration_text}'
             f' &rarr; <b>{out_w}x{out_h}</b>, estimated output ~{size_mb:.0f} MB.')
+    if start or (duration and duration > 0):
+        text += f' Processing a section only (from {start:g} s' + (f' for {duration:g} s' if duration and duration > 0 else '') + ').'
     if not run_sr:
         text += ' Input already covers the target: it will only be re-encoded.'
     if info.is_hdr:
@@ -108,6 +115,11 @@ def build_video_tab():
                 video_color_fix = gr.Dropdown(label='Color Fix', choices=flags.video_color_fix_options,
                                               value=modules.config.default_video_color_fix,
                                               info='Keeps the colors of the original frames.')
+                video_color_restore = gr.Slider(label='Restore Faded Colors', minimum=0.0, maximum=1.0, step=0.05,
+                                                value=modules.config.default_video_color_restore,
+                                                info='For old camcorder/VHS/VCD footage: removes the color cast, '
+                                                     'restores contrast and saturation (0 = keep the original colors, '
+                                                     'try 0.7).')
                 video_temporal_blend = gr.Slider(label='Temporal Blend', minimum=0.0, maximum=1.0, step=0.05,
                                                  value=modules.config.default_video_temporal_blend,
                                                  info='Blends still areas with the previous frame to reduce flicker.')
@@ -122,6 +134,16 @@ def build_video_tab():
                 video_crf = gr.Slider(label='Quality (CRF, lower is better)', minimum=0, maximum=51, step=1,
                                       value=modules.config.default_video_crf)
                 with gr.Row():
+                    video_repair_glitches = gr.Checkbox(label='Repair Glitches',
+                                                        value=False, info='Damaged disc/tape: fix corrupted blocks.')
+                    video_repair_freezes = gr.Checkbox(label='Repair Freezes',
+                                                       value=False, info='Motion-interpolate short stuck frames.')
+                with gr.Row():
+                    video_start = gr.Number(label='Start (seconds)', value=0, minimum=0, precision=2,
+                                            info='Test your settings on a short section first.')
+                    video_duration = gr.Number(label='Duration (seconds, 0 = to the end)', value=0, minimum=0,
+                                               precision=2)
+                with gr.Row():
                     video_btn = gr.Button(value='Upscale Video', variant='primary', elem_id='video_upscale_button')
                     video_stop_btn = gr.Button(value='Stop', elem_id='video_stop_button', visible=False)
                 gr.HTML('<a href="https://github.com/lllyasviel/Fooocus/discussions/117" target="_blank">'
@@ -131,8 +153,11 @@ def build_video_tab():
         tab=video_tab, input=video_input, path=video_path_box, info=video_info, progress=video_progress, preview=video_preview,
         output=video_output, file=video_file, download_html=video_download_html,
         model=video_model, model_refresh=video_model_refresh, target=video_target, color_fix=video_color_fix,
-        temporal_blend=video_temporal_blend, face_enhance=video_face_enhance, face_strength=video_face_strength,
-        codec=video_codec, crf=video_crf, btn=video_btn, stop_btn=video_stop_btn)
+        temporal_blend=video_temporal_blend, color_restore=video_color_restore,
+        face_enhance=video_face_enhance, face_strength=video_face_strength,
+        codec=video_codec, crf=video_crf, start=video_start, duration=video_duration,
+        repair_glitches=video_repair_glitches, repair_freezes=video_repair_freezes,
+        btn=video_btn, stop_btn=video_stop_btn)
     return video_tab, components
 
 
@@ -151,7 +176,19 @@ def resolve_input_path(upload, path_text) -> str:
     return str(getattr(upload, 'name', upload) or '')
 
 
-def trigger_video_probe(upload, path_text, target, codec, crf):
+def _trim_values(start, duration):
+    try:
+        start = max(0.0, float(start or 0))
+    except (TypeError, ValueError):
+        start = 0.0
+    try:
+        duration = float(duration or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    return start, (duration if duration > 0 else None)
+
+
+def trigger_video_probe(upload, path_text, target, codec, crf, start=0, duration=0):
     video_path = resolve_input_path(upload, path_text)
     if not video_path:
         return gr.update(value='')
@@ -162,9 +199,10 @@ def trigger_video_probe(upload, path_text, target, codec, crf):
     try:
         from modules.video_upscaler import compute_target
         info = probe_video(video_path)
+        start, duration = _trim_values(start, duration)
         out_w, out_h, run_sr = compute_target(info.width, info.height, target)
-        size_mb = estimate_output_size_mb(out_w, out_h, info.fps, info.duration, codec, crf)
-        return gr.update(value=format_probe_html(info, out_w, out_h, run_sr, size_mb))
+        size_mb = estimate_output_size_mb(out_w, out_h, info.fps, info.trimmed_duration(start, duration), codec, crf)
+        return gr.update(value=format_probe_html(info, out_w, out_h, run_sr, size_mb, start, duration))
     except Exception as e:
         traceback.print_exc()
         return gr.update(value=make_error_html(f'Could not read video: {e}'))
@@ -176,8 +214,10 @@ def stop_video_clicked():
 
 
 def run_video_upscale(upload, path_text, model_name, target, color_fix, temporal_blend,
-                      face_enhance, face_strength, codec, crf):
+                      face_enhance, face_strength, codec, crf, color_restore=0.0, start=0, duration=0,
+                      repair_glitches=False, repair_freezes=False):
     video_path = resolve_input_path(upload, path_text)
+    start, duration = _trim_values(start, duration)
     # outputs = [progress, preview, output video, download file, download link]
     def ui(progress=None, preview=None, output=None, file=None, link=None):
         return (progress if progress is not None else gr.update(),
@@ -225,6 +265,8 @@ def run_video_upscale(upload, path_text, model_name, target, color_fix, temporal
             options = VideoUpscaleOptions(
                 model_name=model_name, target=target, color_fix=color_fix, temporal_blend=float(temporal_blend),
                 face_enhance=bool(face_enhance), face_strength=float(face_strength), codec=codec, crf=int(crf),
+                color_restore=float(color_restore or 0.0), start=start, duration=duration,
+                repair_glitches=bool(repair_glitches), repair_freezes=bool(repair_freezes),
                 preset=modules.config.default_video_encoder_preset,
                 fp16=None if modules.config.default_video_fp16 else False)
             result['path'] = upscale_video(video_path, output_path, options,
@@ -290,12 +332,12 @@ def bind_events(c: dict, generate_button):
     c['model_refresh'].click(lambda: gr.update(choices=list_video_models()), outputs=c['model'],
                              queue=False, show_progress=False)
 
-    probe_inputs = [c['input'], c['path'], c['target'], c['codec'], c['crf']]
+    probe_inputs = [c['input'], c['path'], c['target'], c['codec'], c['crf'], c['start'], c['duration']]
     c['input'].upload(trigger_video_probe, inputs=probe_inputs, outputs=c['info'], queue=False, show_progress=False)
     c['input'].clear(trigger_video_probe, inputs=probe_inputs, outputs=c['info'], queue=False, show_progress=False)
     c['path'].submit(trigger_video_probe, inputs=probe_inputs, outputs=c['info'], queue=False, show_progress=False)
     c['path'].blur(trigger_video_probe, inputs=probe_inputs, outputs=c['info'], queue=False, show_progress=False)
-    for component in (c['target'], c['codec'], c['crf']):
+    for component in (c['target'], c['codec'], c['crf'], c['start'], c['duration']):
         component.change(trigger_video_probe, inputs=probe_inputs, outputs=c['info'], queue=False, show_progress=False)
 
     c['btn'].click(lambda: (gr.update(visible=False, interactive=False), gr.update(visible=True, interactive=True),
@@ -303,7 +345,8 @@ def bind_events(c: dict, generate_button):
                    outputs=[c['btn'], c['stop_btn'], generate_button], queue=False, show_progress=False) \
         .then(run_video_upscale,
               inputs=[c['input'], c['path'], c['model'], c['target'], c['color_fix'], c['temporal_blend'],
-                      c['face_enhance'], c['face_strength'], c['codec'], c['crf']],
+                      c['face_enhance'], c['face_strength'], c['codec'], c['crf'], c['color_restore'],
+                      c['start'], c['duration'], c['repair_glitches'], c['repair_freezes']],
               outputs=[c['progress'], c['preview'], c['output'], c['file'], c['download_html']],
               show_progress=False, queue=True) \
         .then(lambda: (gr.update(visible=True, interactive=True), gr.update(visible=False, interactive=False),

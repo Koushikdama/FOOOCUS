@@ -194,3 +194,15 @@ The bundled `fooocus_upscaler_s409985e5.bin` is a large ESRGAN model: expect 8-1
 ### On Colab the page shows a red "Error: Unexpected token '<', "<!DOCTYPE "... is not valid JSON" box
 
 This comes from the `gradio.live` share tunnel, not from Fooocus: one of the page's start-up requests was answered by the tunnel with an HTML error page instead of JSON (Gradio 3.41 then shows the parse error). The server itself is fine; the only effect is that one cosmetic page-load update is skipped. Close the box and continue, or use the Colab proxy URL that the notebook prints after `App started successful` (it is routed through Google's infrastructure and does not have this problem).
+
+### Video Upscale output is sharper but still looks like an old faded video
+
+That is what the default settings do on purpose: `Color Fix: wavelet` keeps the colors of the original frames so nothing shifts. For faded camcorder/VHS/VCD footage set **Restore Faded Colors** to 0.6-0.8 (it removes the color cast and restores contrast and saturation, smoothly over time), and turn on **Face Enhance** for people. Use **Duration** to test the settings on a short section first.
+
+### Video Upscale: the source has stuck frames or blocky garbage from a damaged disc
+
+Turn on **Repair Glitches** (corrupted blocks / garbage frames are rebuilt from the neighbouring frames) and **Repair Freezes** (short runs of repeated frames are motion-interpolated). They cannot invent footage that is missing from the file: if the picture jumps forward, the data was never ripped; re-rip the disc with an error-correcting tool.
+
+### Video Upscale output looks squashed or stretched compared to the source
+
+Fixed in 2.6.0: the sample aspect ratio of the source (non-square pixels, e.g. 352x288 VCD, 720x576 DVD) is now applied before processing. Check the input with `ffprobe -show_entries stream=width,height,sample_aspect_ratio,display_aspect_ratio in.mp4`.

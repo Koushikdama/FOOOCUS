@@ -46,7 +46,15 @@ class TestUiVideoHelpers(unittest.TestCase):
         self.assertIn('300 frames', text)
         self.assertIn('42 MB', text)
         self.assertNotIn('re-encoded', text)
+        self.assertNotIn('section', text)
         self.assertIn('re-encoded', ui_video.format_probe_html(info, 1920, 1080, False, 1.0))
+        trimmed = ui_video.format_probe_html(info, 3840, 2160, True, 1.0, start=2.0, duration=3.0)
+        self.assertIn('90 frames', trimmed)
+        self.assertIn('section', trimmed)
+        anamorphic = VideoInfo(width=384, height=288, fps=Fraction(25), nb_frames=10, duration=0.4,
+                               stored_width=352, stored_height=288, sar=Fraction(12, 11))
+        self.assertIn('352x288', ui_video.format_probe_html(anamorphic, 2880, 2160, True, 1.0))
+        self.assertIn('non-square', ui_video.format_probe_html(anamorphic, 2880, 2160, True, 1.0))
 
     def test_make_error_html_escapes(self):
         self.assertIn('&lt;b&gt;', ui_video.make_error_html('<b>'))
@@ -60,6 +68,11 @@ class TestUiVideoHelpers(unittest.TestCase):
             ui_video.bind_events(ctrls, generate_button)
         self.assertEqual(ctrls['target'].value, '4K')
         self.assertEqual(ctrls['codec'].value, 'h264')
+        self.assertEqual(ctrls['color_restore'].value, 0.0)
+        self.assertEqual(ctrls['start'].value, 0)
+        self.assertEqual(ctrls['duration'].value, 0)
+        self.assertFalse(ctrls['repair_glitches'].value)
+        self.assertFalse(ctrls['repair_freezes'].value)
         import importlib.util
         if importlib.util.find_spec('torch') is not None:   # model listing needs the SR backend
             self.assertIn('realesr-general-x4v3.pth', ctrls['model'].choices)
@@ -73,6 +86,12 @@ class TestUiVideoHelpers(unittest.TestCase):
         missing = list(ui_video.run_video_upscale(None, '/no/such/file.mp4', 'm', '4K', 'wavelet', 0.25, False, 0.7,
                                                   'h264', 18))
         self.assertIn('not found', missing[0][0]['value'])
+
+    def test_trim_values(self):
+        self.assertEqual(ui_video._trim_values(None, None), (0.0, None))
+        self.assertEqual(ui_video._trim_values('', 0), (0.0, None))
+        self.assertEqual(ui_video._trim_values(2, 5), (2.0, 5.0))
+        self.assertEqual(ui_video._trim_values(-1, 'x'), (0.0, None))
 
     def test_resolve_input_path(self):
         class Upload:
@@ -94,7 +113,7 @@ class TestUiVideoHelpers(unittest.TestCase):
         try:
             clip = video_io.make_synthetic_video(os.path.join(tmp, 'in.mp4'), 96, 64, 5, 10, audio=True)
             outputs = list(ui_video.run_video_upscale(None, clip, os.environ['FOOOCUS_TEST_SR_MODEL'], '2x', 'wavelet',
-                                                      0.25, False, 0.7, 'h264', 20))
+                                                      0.25, False, 0.7, 'h264', 20, 0.7, 0, 0))
             final = outputs[-1]
             self.assertEqual(final[0]['visible'], False)              # progress hidden
             self.assertEqual(final[2]['visible'], True)               # h264 result is playable

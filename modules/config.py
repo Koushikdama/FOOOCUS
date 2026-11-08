@@ -746,6 +746,12 @@ default_video_temporal_blend = get_config_item_or_set_default(
     validator=lambda x: isinstance(x, numbers.Number) and 0 <= x <= 1,
     expected_type=numbers.Number
 )
+default_video_color_restore = get_config_item_or_set_default(
+    key='default_video_color_restore',
+    default_value=0.0,
+    validator=lambda x: isinstance(x, numbers.Number) and 0 <= x <= 1,
+    expected_type=numbers.Number
+)
 default_video_face_enhance = get_config_item_or_set_default(
     key='default_video_face_enhance',
     default_value=False,

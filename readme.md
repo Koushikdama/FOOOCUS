@@ -44,7 +44,7 @@ Below is a quick list using Midjourney's examples:
 | --ar | Advanced -> Aspect Ratios |
 | InsightFace | Input Image -> Image Prompt -> Advanced -> FaceSwap |
 | Describe | Input Image -> Describe |
-| Video Upscale | Input Image -> Video Upscale <br> (Frame-by-frame upscaling to 4K / 1080p / 2x / 4x with color preservation, flicker reduction and optional GFPGAN face restoration. Needs the `ffmpeg` binary, see [Video Upscale](#video-upscale).) |
+| Video Upscale | Input Image -> Video Upscale <br> (Frame-by-frame upscaling to 4K / 1080p / 2x / 4x with color preservation, flicker reduction, optional GFPGAN face restoration, and restoration of old footage: faded colors, corrupted blocks and stuck frames. Needs the `ffmpeg` binary, see [Video Upscale](#video-upscale).) |
 
 Below is a quick list using LeonardoAI's examples:
 
@@ -447,8 +447,20 @@ What happens to each frame:
 1. **Super-resolution** with the selected model, tiled so it fits in VRAM (tiles shrink automatically on out-of-memory).
 2. **Resize** to the target (`4K` fits 3840x2160, `1080p` fits 1920x1080, `2x`/`4x` are fixed factors).
 3. **Color Fix** (`wavelet`, default) takes the detail from the upscaled frame but the colors from the original, so nothing shifts. `adain` only matches mean/contrast; `none` disables it.
-4. **Face Enhance** (optional) restores faces with GFPGAN v1.4; the strength slider blends the restored face with the original.
-5. **Temporal Blend** smooths still areas with the previous frame to remove the flicker that per-frame upscaling causes; moving areas and scene cuts are left alone.
+4. **Restore Faded Colors** (optional, 0 = off) is the opposite of Color Fix: for old camcorder / VHS / VCD footage it removes the color cast, puts the black and white points back where they belong and restores saturation. The correction is measured on each source frame, smoothed over time so it cannot flicker, and re-measured at scene cuts.
+5. **Face Enhance** (optional) restores faces with GFPGAN v1.4; the strength slider blends the restored face with the original.
+6. **Temporal Blend** smooths still areas with the previous frame to remove the flicker that per-frame upscaling causes; moving areas and scene cuts are left alone.
+
+Sources with non-square pixels (352x288 VCD, 720x576 DVD/DV, ...) are converted to square pixels first, so the output keeps the 4:3 or 16:9 shape players show for the original. **Start** / **Duration** process only a section of the video: test your settings on 20 seconds before committing hours of GPU time to a full tape.
+
+### Old or damaged footage
+
+A typical recipe for a 2000s wedding tape ripped from a VCD/DVD: `Restore Faded Colors` 0.6-0.8, `Face Enhance` on (strength 0.5-0.7), `Temporal Blend` 0.3, target `1080p` or `4K`, codec `h265` for the final file. Two more options fix damage caused by a scratched disc or a worn tape:
+
+* **Repair Glitches** looks one frame ahead: where the previous and next frames agree but the current frame has corrupted blocks or is garbage, those pixels are rebuilt from the neighbours. Camera flashes are recognised and kept.
+* **Repair Freezes** replaces short runs of repeated (stuck) frames with motion-interpolated frames (`mpdecimate` + `minterpolate` in ffmpeg). Freezes longer than half a second are left as they are, because a long morph looks worse than a pause. The duration and audio sync do not change. This is quick for SD sources and slow for HD ones.
+
+Neither option can recover a section whose data is missing from the file (the picture jumps). If the rip itself is broken, re-rip the disc with an error-correcting tool first.
 
 Models: the dropdown lists the built-in ones plus every `.pth`/`.safetensors` file in `models/upscale_models` (ESRGAN/Real-ESRGAN, Real-ESRGAN Compact, SwinIR, Swin2SR, HAT, DAT, OmniSR, SCUNet and similar models from [OpenModelDB](https://openmodeldb.info/) work).
 
@@ -462,10 +474,11 @@ The same pipeline is available from the command line, which is convenient on Col
 
 ```
 python video_upscale.py input.mp4 --out output.mp4 --target 4K --tile 0 --preset fast --face-enhance -- --always-high-vram
+python video_upscale.py old_tape.mp4 --color-restore 0.7 --repair-glitches --repair-freezes --face-enhance --start 60 --duration 20
 python video_upscale.py --list-models
 ```
 
-Flags after `--` go to Fooocus itself. HDR (PQ/HLG) sources are not supported yet; tone-map them to SDR first. Related config keys: `default_video_upscale_model`, `default_video_upscale_target`, `default_video_color_fix`, `default_video_temporal_blend`, `default_video_face_enhance`, `default_video_face_strength`, `default_video_codec`, `default_video_crf`, `default_video_encoder_preset`, `default_video_fp16`, `path_face_restoration`. Use `--disable-video-upscale` to hide the tab.
+Flags after `--` go to Fooocus itself. HDR (PQ/HLG) sources are not supported yet; tone-map them to SDR first. Related config keys: `default_video_upscale_model`, `default_video_upscale_target`, `default_video_color_fix`, `default_video_color_restore`, `default_video_temporal_blend`, `default_video_face_enhance`, `default_video_face_strength`, `default_video_codec`, `default_video_crf`, `default_video_encoder_preset`, `default_video_fp16`, `path_face_restoration`. Use `--disable-video-upscale` to hide the tab.
 
 ## Forks
 

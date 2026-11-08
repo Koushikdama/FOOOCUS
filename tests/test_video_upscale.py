@@ -39,6 +39,27 @@ if HAS_TORCH:
         return vu.VideoUpscaleOptions(**base)
 
 
+def _moving_square_frames(n: int = 30, size: int = 64):
+    """Gray background with a gradient (so the scene has texture) and a bright square moving 2 px per frame."""
+    frames = []
+    yy, xx = np.mgrid[0:size, 0:size]
+    background = np.stack([40 + xx * 2, 80 + yy * 2, np.full_like(xx, 120)], -1).astype(np.uint8)
+    for i in range(n):
+        f = background.copy()
+        x0 = 4 + 2 * i
+        f[8:24, x0:x0 + 16] = (250, 250, 250)
+        frames.append(f)
+    return frames
+
+
+def _write_frames(path: str, frames, fps: int = 10) -> str:
+    h, w = frames[0].shape[:2]
+    with video_io.FrameWriter(path, w, h, Fraction(fps), codec='h264', crf=1, preset='ultrafast') as writer:
+        for f in frames:
+            writer.write(f)
+    return path
+
+
 @unittest.skipUnless(HAS_FFMPEG, 'ffmpeg/ffprobe not on PATH')
 class TestVideoIO(unittest.TestCase):
     @classmethod
@@ -97,6 +118,53 @@ class TestVideoIO(unittest.TestCase):
         self.assertEqual(out_info.color_range, 'tv')
         self.assertTrue(out_info.has_audio)
         self.assertIn(out_info.nb_frames, (9, 10, 11))
+
+    def test_non_square_pixels_are_decoded_square(self):
+        # 352x288 VCD-style footage carries SAR 12:11 and displays as 4:3; we process square pixels.
+        src = video_io.make_synthetic_video(os.path.join(self.tmp, 'sar.mp4'), 88, 72, 3, 10, audio=False,
+                                            sar='12/11')
+        info = video_io.probe_video(src)
+        self.assertEqual(info.sar, Fraction(12, 11))
+        self.assertTrue(info.has_non_square_pixels)
+        self.assertEqual((info.stored_width, info.stored_height), (88, 72))
+        self.assertEqual((info.width, info.height), (96, 72))           # 88 * 12/11 = 96 -> 4:3
+        frames = list(video_io.iter_frames(src, info))
+        self.assertEqual(frames[0].shape, (72, 96, 3))
+        self.assertFalse(video_io.probe_video(self.clip).has_non_square_pixels)
+
+    def test_trim_start_and_duration(self):
+        src = video_io.make_synthetic_video(os.path.join(self.tmp, 'long.mp4'), 64, 64, 30, 10, audio=True)
+        info = video_io.probe_video(src)
+        self.assertEqual(info.estimated_frames(1.0, 1.0), 10)
+        self.assertEqual(info.estimated_frames(2.5, None), 5)
+        self.assertEqual(info.estimated_frames(0, 0), info.estimated_total_frames)
+        frames = list(video_io.iter_frames(src, info, start=1.0, duration=1.0))
+        self.assertIn(len(frames), (9, 10, 11))
+        full = list(video_io.iter_frames(src, info))
+        # testsrc2 draws a frame counter, so frame 10 of the full clip must match frame 0 of the trimmed one.
+        self.assertLess(np.abs(full[10].astype(np.float32) - frames[0].astype(np.float32)).mean(), 4.0)
+        out = os.path.join(self.tmp, 'trimmed.mp4')
+        with video_io.FrameWriter(out, 64, 64, info.fps, audio_source=src, audio_codec=info.audio_codec,
+                                  codec='h264', crf=20, preset='ultrafast', start=1.0, duration=1.0) as w:
+            for frame in frames:
+                w.write(frame)
+        out_info = video_io.probe_video(out)
+        self.assertTrue(out_info.has_audio)
+        self.assertAlmostEqual(out_info.duration, 1.0, delta=0.25)       # audio trimmed to the video section
+
+    def test_freeze_repair_interpolates_stuck_frames(self):
+        frames = _moving_square_frames(30)
+        frozen = frames[:10] + [frames[9]] * 4 + frames[14:]          # frames 10..13 stuck on frame 9
+        src = _write_frames(os.path.join(self.tmp, 'frozen.mp4'), frozen)
+        info = video_io.probe_video(src)
+        plain = list(video_io.iter_frames(src, info))
+        repaired = list(video_io.iter_frames(src, info, repair_freezes=True))
+        self.assertEqual(len(repaired), len(plain))                     # duration / audio sync unchanged
+        diff = lambda a, b: np.abs(a.astype(np.float32) - b.astype(np.float32)).mean()
+        self.assertLess(diff(plain[11], plain[9]), 1.0)                 # really frozen in the source
+        self.assertGreater(diff(repaired[11], repaired[9]), 1.0)        # ... and moving again after repair
+        self.assertLess(diff(repaired[11], frames[11]), diff(plain[11], frames[11]))   # closer to the truth
+        self.assertLess(diff(repaired[20], frames[20]), 2.0)            # untouched frames stay intact
 
     def test_writer_failure_removes_partial_file(self):
         out = os.path.join(self.tmp, 'cancel.mp4')
@@ -169,6 +237,96 @@ class TestVideoUpscalerPure(unittest.TestCase):
         b[:, :, :, 16:] = 0.5                                         # right half moved a lot
         out = blender(b.clone(), b)
         self.assertTrue(torch.equal(out[:, :, :, 24:], b[:, :, :, 24:]))   # moving region untouched
+
+    @staticmethod
+    def _faded(x):
+        # Simulate an old tape: yellow cast, lifted blacks / dull whites, low saturation.
+        y = 0.299 * x[:, 0:1] + 0.587 * x[:, 1:2] + 0.114 * x[:, 2:3]
+        x = y + (x - y) * 0.5
+        x = x * torch.tensor([1.15, 1.05, 0.80]).view(1, 3, 1, 1)
+        return (x * 0.5 + 0.2).clamp(0, 1)
+
+    def test_color_restorer_fixes_cast_contrast_and_saturation(self):
+        torch.manual_seed(0)
+        clean = torch.rand(1, 3, 48, 64)
+        faded = self._faded(clean)
+        restorer = vu.ColorRestorer(strength=1.0)
+        fixed = restorer(faded, faded)
+        # Color cast: channel means move much closer together.
+        cast_before = float(faded.mean((2, 3)).std())
+        cast_after = float(fixed.mean((2, 3)).std())
+        self.assertLess(cast_after, cast_before * 0.5)
+        # Contrast: the luminance range is stretched back toward full scale.
+        self.assertGreater(float(fixed.max() - fixed.min()), float(faded.max() - faded.min()) + 0.3)
+        # Saturation: per-pixel chroma goes up.
+        chroma = lambda t: float((t.amax(1) - t.amin(1)).mean())
+        self.assertGreater(chroma(fixed), chroma(faded) * 1.3)
+        # Strength 0 is the identity and the restorer never produces out-of-range values.
+        self.assertTrue(torch.equal(vu.ColorRestorer(strength=0.0)(faded, faded), faded))
+        self.assertTrue(bool((fixed >= 0).all() and (fixed <= 1).all()))
+
+    def test_color_restorer_is_temporally_smooth_and_resets_on_cut(self):
+        torch.manual_seed(1)
+        a = self._faded(torch.rand(1, 3, 32, 32))
+        restorer = vu.ColorRestorer(strength=1.0, smoothing=0.1)
+        first = restorer(a, a)
+        # Same source again -> identical parameters -> identical output (no flicker on a still shot).
+        self.assertTrue(torch.allclose(restorer(a, a), first, atol=1e-5))
+        # A slightly different frame changes the parameters only a little (EMA), not all at once.
+        b = (a * 0.9).clamp(0, 1)
+        white_before = restorer.white
+        restorer(b, b)
+        _, _, white_b = vu.ColorRestorer._measure(b)
+        self.assertLess(abs(restorer.white - white_before), abs(white_b - white_before))
+        # A scene cut re-measures from scratch.
+        dark = torch.full((1, 3, 32, 32), 0.05)
+        restorer(dark, dark)
+        self.assertEqual(restorer.cuts, 1)
+        _, _, white_dark = vu.ColorRestorer._measure(dark)
+        self.assertAlmostEqual(restorer.white, white_dark, places=5)
+
+    def test_color_restorer_applies_source_stats_to_large_output(self):
+        torch.manual_seed(2)
+        src = self._faded(torch.rand(1, 3, 16, 16))
+        big = F.interpolate(src, scale_factor=4, mode='nearest')
+        restorer = vu.ColorRestorer(strength=0.7)
+        out = restorer(big, src)
+        self.assertEqual(out.shape, big.shape)
+        self.assertFalse(torch.allclose(out, big))
+
+    @staticmethod
+    def _t(frame):
+        return torch.from_numpy(frame).permute(2, 0, 1)[None].float() / 255.0
+
+    def test_glitch_repair_fixes_blocks_and_garbage_frames_but_keeps_flashes(self):
+        frames = _moving_square_frames(8)
+        prev, cur, nxt = (self._t(f) for f in frames[2:5])
+        repair = vu.GlitchRepair()
+        # Clean frames pass through untouched.
+        self.assertTrue(torch.equal(repair(prev, cur.clone(), nxt), cur))
+        # A corrupted 16x16 block in the static background is replaced by the neighbours' content.
+        damaged = cur.clone()
+        damaged[..., 40:56, 40:56] = torch.tensor([0.0, 0.8, 0.0]).view(1, 3, 1, 1)   # green macroblock garbage
+        fixed = repair(prev, damaged, nxt)
+        self.assertLess(float((fixed - cur)[..., 40:56, 40:56].abs().mean()), 0.01)
+        self.assertLess(float((fixed - cur).abs().mean()), 0.002)      # the moving square was left alone
+        # A garbage frame (noise) is replaced entirely.
+        torch.manual_seed(0)
+        garbage = torch.rand_like(cur)
+        fixed = repair(prev, garbage, nxt)
+        self.assertEqual(repair.frames_replaced, 1)
+        self.assertLess(float((fixed - 0.5 * (prev + nxt)).abs().max()), 1e-6)
+        # A camera flash (whole frame brighter for one frame) is not damage and must survive.
+        flash = (cur * 1.6).clamp(0, 1)
+        self.assertTrue(torch.allclose(repair(prev, flash, nxt), flash))
+        # First / last frame have no neighbour on one side: unchanged.
+        self.assertTrue(torch.equal(repair(None, damaged, nxt), damaged))
+        self.assertTrue(torch.equal(repair(prev, damaged, None), damaged))
+
+    def test_with_lookahead(self):
+        self.assertEqual(list(vu._with_lookahead([])), [])
+        self.assertEqual(list(vu._with_lookahead([1])), [(1, None)])
+        self.assertEqual(list(vu._with_lookahead([1, 2, 3])), [(1, 2), (2, 3), (3, None)])
 
     def test_sr_frame_tiled_matches_whole_frame(self):
         model = IdentityX4()
@@ -247,6 +405,43 @@ class TestVideoUpscalerPipeline(unittest.TestCase):
         vu.upscale_video(src, out, _options(target='1080p'), sr_model=IdentityX4())
         info = video_io.probe_video(out)
         self.assertEqual((info.width, info.height), (1920, 1080))
+
+    def test_trim_color_restore_and_non_square_pixels(self):
+        src = video_io.make_synthetic_video(os.path.join(self.tmp, 'tape.mp4'), 88, 72, 30, 10, audio=True,
+                                            sar='12/11')
+        out = os.path.join(self.tmp, 'tape_out.mp4')
+        progress = []
+        vu.upscale_video(src, out, _options(target='2x', color_restore=0.7, start=1.0, duration=1.0),
+                         sr_model=IdentityX4(), progress_cb=lambda *a: progress.append(a))
+        info = video_io.probe_video(out)
+        self.assertEqual((info.width, info.height), (192, 144))          # 96x72 square pixels, 2x -> 4:3
+        self.assertIn(info.nb_frames, (9, 10, 11))
+        self.assertEqual(progress[0][1], 10)                              # total frames reflects the trim
+        self.assertTrue(info.has_audio)
+        self.assertAlmostEqual(info.duration, 1.0, delta=0.25)
+
+    def test_pipeline_repairs_damaged_source(self):
+        frames = _moving_square_frames(12)
+        damaged = [f.copy() for f in frames]
+        damaged[5][40:56, 40:56] = (0, 200, 0)                           # corrupted block
+        damaged[8] = frames[7]                                           # one stuck frame
+        src = _write_frames(os.path.join(self.tmp, 'damaged.mp4'), damaged)
+        out = os.path.join(self.tmp, 'damaged_out.mp4')
+        vu.upscale_video(src, out, _options(target='2x', repair_glitches=True, repair_freezes=True),
+                         sr_model=IdentityX4())
+        result = list(video_io.iter_frames(out))
+        self.assertEqual(len(result), 12)
+        truth = [np.repeat(np.repeat(f, 2, 0), 2, 1).astype(np.float32) for f in frames]
+        diff = lambda a, b: np.abs(a.astype(np.float32) - b).mean()
+        self.assertLess(diff(result[5][80:112, 80:112], truth[5][80:112, 80:112]), 6.0)   # block repaired
+        self.assertLess(diff(result[8], truth[8]), diff(np.repeat(np.repeat(damaged[8], 2, 0), 2, 1), truth[8]))
+
+    def test_start_beyond_end_fails_cleanly(self):
+        out = os.path.join(self.tmp, 'empty.mp4')
+        with self.assertRaises(vu.VideoUpscaleError):
+            vu.upscale_video(self.clip, out, _options(start=100.0), sr_model=IdentityX4())
+        self.assertFalse(os.path.exists(out))
+        self.assertFalse(any(name.endswith('.part.mp4') for name in os.listdir(self.tmp)))
 
     def test_cancel_cleans_up(self):
         out = os.path.join(self.tmp, 'cancelled.mp4')

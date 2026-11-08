@@ -42,7 +42,7 @@ def ffmpeg_available() -> bool:
 
 @dataclass
 class VideoInfo:
-    width: int                      # after applying rotation metadata
+    width: int                      # square-pixel display size, after applying rotation metadata
     height: int
     fps: Fraction
     nb_frames: Optional[int]
@@ -57,6 +57,13 @@ class VideoInfo:
     has_audio: bool = False
     audio_codec: str = ''
     is_vfr_hint: bool = False
+    stored_width: int = 0           # coded frame size (before rotation / pixel aspect correction)
+    stored_height: int = 0
+    sar: Fraction = Fraction(1)     # sample (pixel) aspect ratio; != 1 for VCD/DVD/DV style anamorphic footage
+
+    @property
+    def has_non_square_pixels(self) -> bool:
+        return self.sar != 1
 
     @property
     def is_hdr(self) -> bool:
@@ -75,6 +82,23 @@ class VideoInfo:
             return max(1, round(self.duration * float(self.fps)))
         return None
 
+    def trimmed_duration(self, start: float = 0.0, duration: Optional[float] = None) -> Optional[float]:
+        """Seconds that will be processed when decoding from `start` for at most `duration` seconds."""
+        if self.duration is None:
+            return duration if duration and duration > 0 else None
+        remaining = max(0.0, self.duration - max(0.0, start))
+        if duration and duration > 0:
+            remaining = min(remaining, duration)
+        return remaining
+
+    def estimated_frames(self, start: float = 0.0, duration: Optional[float] = None) -> Optional[int]:
+        if start <= 0 and not (duration and duration > 0):
+            return self.estimated_total_frames
+        seconds = self.trimmed_duration(start, duration)
+        if seconds is None or self.fps <= 0:
+            return None
+        return max(1, round(seconds * float(self.fps)))
+
 
 def _parse_fraction(text) -> Fraction:
     try:
@@ -82,6 +106,19 @@ def _parse_fraction(text) -> Fraction:
         return f if f > 0 else Fraction(0)
     except (ValueError, ZeroDivisionError):
         return Fraction(0)
+
+
+def _parse_sar(text) -> Fraction:
+    """ffprobe prints the sample aspect ratio as 'num:den'; '0:1', 'N/A' and missing mean square pixels."""
+    if not text or text in ('N/A', '0:1', '1:1'):
+        return Fraction(1)
+    try:
+        num, den = str(text).split(':')
+        sar = Fraction(int(num), int(den))
+    except (ValueError, ZeroDivisionError):
+        return Fraction(1)
+    # Guard against garbage tags; real anamorphic content stays well inside this window.
+    return sar if 0.5 <= sar <= 2.0 and sar > 0 else Fraction(1)
 
 
 def _parse_rotation(stream: dict) -> int:
@@ -105,7 +142,7 @@ def probe_video(path: str) -> VideoInfo:
     cmd = [
         FFPROBE, '-v', 'error',
         '-show_entries',
-        'stream=index,codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,nb_frames,'
+        'stream=index,codec_type,codec_name,width,height,sample_aspect_ratio,r_frame_rate,avg_frame_rate,nb_frames,'
         'pix_fmt,color_range,color_space,color_primaries,color_transfer'
         ':stream_tags=rotate:stream_side_data=rotation:format=duration',
         '-of', 'json', path,
@@ -137,7 +174,12 @@ def probe_video(path: str) -> VideoInfo:
     except (TypeError, ValueError):
         nb_frames = None
 
-    width, height = int(video['width']), int(video['height'])
+    stored_width, stored_height = int(video['width']), int(video['height'])
+    sar = _parse_sar(video.get('sample_aspect_ratio'))
+    # Non-square pixels (e.g. 352x288 VCD with SAR 12:11 displays as 4:3): process square pixels so the
+    # output keeps the shape players show for the source.
+    width = stored_width if sar == 1 else max(2, int(round(stored_width * sar / 2)) * 2)
+    height = stored_height
     rotation = _parse_rotation(video)
     if rotation in (90, 270):
         width, height = height, width
@@ -154,6 +196,7 @@ def probe_video(path: str) -> VideoInfo:
         rotation=rotation,
         has_audio=audio is not None, audio_codec=(audio or {}).get('codec_name', '') or '',
         is_vfr_hint=(avg > 0 and real > 0 and avg != real),
+        stored_width=stored_width, stored_height=stored_height, sar=sar,
     )
 
 
@@ -191,18 +234,46 @@ def _stderr_text(stderr_file) -> str:
         return ''
 
 
-def iter_frames(path: str, info: Optional[VideoInfo] = None) -> Iterator[np.ndarray]:
-    """Yield every frame as an HxWx3 RGB uint8 array (full range), at a constant frame rate."""
+def _trim_args(start: float = 0.0, duration: Optional[float] = None) -> list:
+    """Input-side seek/limit options (placed before -i) for the video and the audio source alike."""
+    args = []
+    if start and start > 0:
+        args += ['-ss', f'{float(start):.6f}']
+    if duration and duration > 0:
+        args += ['-t', f'{float(duration):.6f}']
+    return args
+
+
+def freeze_repair_filter(fps: Fraction, max_freeze_seconds: float = 0.5) -> str:
+    """ffmpeg filters that replace short runs of repeated frames (damaged disc/tape read errors) with
+    motion-interpolated frames. `mpdecimate` drops frames identical to the previous one, at most
+    `max_freeze_seconds` in a row, so a long freeze stays a freeze instead of a slow morph; `minterpolate`
+    fills the gaps at the original frame rate, so the duration and the audio sync do not change."""
+    max_drop = max(1, int(round(float(fps) * max_freeze_seconds)))
+    rate = f'{fps.numerator}/{fps.denominator}'
+    return (f'mpdecimate=max={max_drop},'
+            f'minterpolate=fps={rate}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1')
+
+
+def iter_frames(path: str, info: Optional[VideoInfo] = None, start: float = 0.0,
+                duration: Optional[float] = None, repair_freezes: bool = False) -> Iterator[np.ndarray]:
+    """Yield every frame as an HxWx3 RGB uint8 array (full range, square pixels), at a constant frame rate.
+
+    `start`/`duration` (seconds) process only a section of the video; the audio is trimmed to match by
+    passing the same values to FrameWriter. `repair_freezes` motion-interpolates short runs of repeated
+    frames (see freeze_repair_filter)."""
     if info is None:
         info = probe_video(path)
     w, h = info.width, info.height
     vf = (
+        (freeze_repair_filter(info.fps) + ',' if repair_freezes else '') +
         f'fps={info.fps.numerator}/{info.fps.denominator},'
-        f'scale=in_range={_input_color_range(info)}:in_color_matrix={_input_color_matrix(info)}'
-        f':out_range=pc:flags={SCALE_FLAGS},format=rgb24'
+        f'scale=w={w}:h={h}:in_range={_input_color_range(info)}:in_color_matrix={_input_color_matrix(info)}'
+        f':out_range=pc:flags={SCALE_FLAGS},setsar=1,format=rgb24'
     )
     cmd = [
         FFMPEG, '-hide_banner', '-loglevel', 'error', '-nostdin',
+        *_trim_args(start, duration),
         '-i', path, '-map', '0:v:0', '-an', '-sn', '-dn',
         '-vf', vf, '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1',
     ]
@@ -254,7 +325,8 @@ class FrameWriter:
 
     def __init__(self, output_path: str, width: int, height: int, fps: Fraction, *,
                  audio_source: Optional[str] = None, audio_codec: str = '',
-                 codec: str = 'h264', crf: int = 18, preset: str = 'fast'):
+                 codec: str = 'h264', crf: int = 18, preset: str = 'fast',
+                 start: float = 0.0, duration: Optional[float] = None):
         assert width % 2 == 0 and height % 2 == 0, 'output size must be even for 4:2:0 encoding'
         self.output_path = os.path.abspath(output_path)
         base, ext = os.path.splitext(self.output_path)
@@ -270,7 +342,7 @@ class FrameWriter:
             '-r', f'{fps.numerator}/{fps.denominator}', '-i', 'pipe:0',
         ]
         if audio_source:
-            cmd += ['-i', audio_source, '-map', '0:v:0', '-map', '1:a:0?']
+            cmd += [*_trim_args(start, duration), '-i', audio_source, '-map', '0:v:0', '-map', '1:a:0?']
             if audio_codec in MP4_SAFE_AUDIO_CODECS:
                 cmd += ['-c:a', 'copy']
             else:
@@ -341,8 +413,10 @@ class FrameWriter:
 
 
 def make_synthetic_video(path: str, width: int = 64, height: int = 64, frames: int = 10, fps: int = 10,
-                         audio: bool = True, source: str = 'testsrc2', codec: str = 'libx264') -> str:
-    """Create a small test clip. `source` is any lavfi video source, e.g. 'testsrc2' or 'color=c=red'."""
+                         audio: bool = True, source: str = 'testsrc2', codec: str = 'libx264',
+                         sar: Optional[str] = None) -> str:
+    """Create a small test clip. `source` is any lavfi video source, e.g. 'testsrc2' or 'color=c=red'.
+    `sar` (e.g. '12/11') tags the clip with non-square pixels."""
     duration = frames / fps
     sep = ':' if '=' in source else '='   # lavfi: first option after '=', the rest after ':'
     cmd = [FFMPEG, '-hide_banner', '-loglevel', 'error', '-y',
@@ -350,13 +424,16 @@ def make_synthetic_video(path: str, width: int = 64, height: int = 64, frames: i
     if audio:
         cmd += ['-f', 'lavfi', '-i', f'sine=frequency=440:sample_rate=44100:duration={duration}']
     cmd += ['-frames:v', str(frames)]
+    sar_vf = f',setsar={sar}' if sar else ''
     if codec == 'libx264':
         cmd += ['-vf', f'scale=out_color_matrix=bt709:out_range=tv:flags={SCALE_FLAGS},format=yuv420p,'
-                       f'setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv',
+                       f'setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv{sar_vf}',
                 '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '12',
                 '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv']
     else:
         cmd += ['-c:v', codec, '-pix_fmt', 'rgb24']
+        if sar:
+            cmd += ['-vf', f'setsar={sar}']
     if audio:
         cmd += ['-c:a', 'aac', '-b:a', '64k', '-shortest']
     cmd += [path]

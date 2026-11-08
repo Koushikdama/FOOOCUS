@@ -2,7 +2,8 @@
 Frame-by-frame video super-resolution for Fooocus.
 
 Pipeline per frame:  decode (ffmpeg) -> SR model (tiled, resident on GPU) -> resize to target
--> color fix (keeps the source colors) -> optional face restoration -> temporal blend -> encode (ffmpeg).
+-> color fix (keeps the source colors) -> optional color restoration (faded footage) -> optional face
+restoration -> temporal blend -> encode (ffmpeg).
 
 Only `torch`, `numpy` and the ldm_patched backend are imported at module level. `modules.config`
 (which parses Fooocus command-line flags) is imported lazily, so this module can be used from
@@ -59,6 +60,11 @@ class VideoUpscaleOptions:
     device: Optional[str] = None        # None -> model_management.get_torch_device()
     force_sr: bool = False              # run the model even if the input is already >= target
     preview_every: float = 2.0          # seconds between preview frames passed to progress_cb
+    color_restore: float = 0.0          # 0 = keep the source colors; 0.5-0.9 restores faded/old footage
+    start: float = 0.0                  # seconds to skip at the beginning
+    duration: Optional[float] = None    # seconds to process (None/0 = until the end)
+    repair_glitches: bool = False       # fix corrupted blocks / garbage frames (damaged disc or tape)
+    repair_freezes: bool = False        # motion-interpolate short runs of repeated frames
 
 
 # ----------------------------------------------------------------------------- models
@@ -257,6 +263,176 @@ def apply_color_fix(mode: str, sr: torch.Tensor, ref: torch.Tensor) -> torch.Ten
     raise VideoUpscaleError(f'Unknown color fix {mode!r}; expected one of {flags.video_color_fix_options}')
 
 
+# ----------------------------------------------------------------------------- damage repair
+
+class GlitchRepair:
+    """Temporal dropout repair for damaged sources (scratched VCD/DVD, tape dropouts).
+
+    Works on source frames with one frame of look-ahead. Where the previous and the next frame agree
+    (nothing moved) but the current frame differs from both, the current pixels are corrupted blocks or a
+    garbage frame: they are replaced by the average of the two neighbours. Decisions are made on 8x8 blocks
+    (the unit MPEG corruption comes in) and on brightness-normalized frames, so a camera flash, which
+    changes the whole frame uniformly for one frame, is kept rather than "repaired".
+    """
+
+    FLASH_RATIO = 1.25
+
+    def __init__(self, block: int = 8, glitch_threshold: float = 0.06, static_threshold: float = 0.04,
+                 whole_frame_threshold: float = 0.10):
+        self.block = int(block)
+        self.glitch_threshold = float(glitch_threshold)
+        self.static_threshold = float(static_threshold)
+        self.whole_frame_threshold = float(whole_frame_threshold)
+        self.frames_touched = 0
+        self.frames_replaced = 0
+
+    def _block_diff(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        d = (a - b).abs().mean(1, keepdim=True)
+        return F.avg_pool2d(d, self.block, stride=self.block, ceil_mode=True, count_include_pad=False)
+
+    @staticmethod
+    def _normalize_brightness(cur: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+        return (cur * (ref.mean() / cur.mean().clamp_min(1e-4))).clamp(0, 1)
+
+    def __call__(self, prev: Optional[torch.Tensor], cur: torch.Tensor, nxt: Optional[torch.Tensor]) -> torch.Tensor:
+        if prev is None or nxt is None:
+            return cur
+        neighbours = 0.5 * (prev + nxt)
+        # A camera flash or exposure jump changes the whole frame's brightness for one frame; that is not
+        # damage (and clipping makes it impossible to normalize away), so such frames are left untouched.
+        ratio = float(cur.mean() / neighbours.mean().clamp_min(1e-4))
+        if not (1.0 / self.FLASH_RATIO) < ratio < self.FLASH_RATIO:
+            return cur
+        cur_n = self._normalize_brightness(cur, neighbours)
+        d_pn = self._block_diff(prev, nxt)
+        d_cp = self._block_diff(cur_n, prev)
+        d_cn = self._block_diff(cur_n, nxt)
+
+        # Whole garbage frame: neighbours agree with each other far better than with the current frame.
+        if float(d_pn.mean()) < 0.5 * float(torch.minimum(d_cp, d_cn).mean()) and \
+                float(torch.minimum(d_cp, d_cn).mean()) > self.whole_frame_threshold:
+            self.frames_touched += 1
+            self.frames_replaced += 1
+            return neighbours
+
+        static = (1.0 - d_pn / self.static_threshold).clamp(0, 1)
+        glitch = ((torch.minimum(d_cp, d_cn) - self.glitch_threshold) / (0.5 * self.glitch_threshold)).clamp(0, 1)
+        mask = static * glitch
+        if float(mask.max()) <= 0:
+            return cur
+        self.frames_touched += 1
+        mask = F.interpolate(mask, size=cur.shape[-2:], mode='nearest')
+        return cur * (1.0 - mask) + neighbours * mask
+
+
+def _with_lookahead(frames):
+    """Yield (frame, next_frame) pairs; next_frame is None for the last frame."""
+    it = iter(frames)
+    try:
+        cur = next(it)
+    except StopIteration:
+        return
+    for nxt in it:
+        yield cur, nxt
+        cur = nxt
+    yield cur, None
+
+
+# ----------------------------------------------------------------------------- color restoration
+
+def _luma(x: torch.Tensor) -> torch.Tensor:
+    return 0.299 * x[:, 0:1] + 0.587 * x[:, 1:2] + 0.114 * x[:, 2:3]
+
+
+def _thumbnail(src: torch.Tensor, width: int = 64) -> torch.Tensor:
+    h, w = src.shape[-2:]
+    th = max(1, round(width * h / w))
+    # Tiny tensor; computed on the CPU because 'area' resizing is not implemented everywhere (MPS).
+    return F.interpolate(src.mean(1, keepdim=True).cpu(), size=(th, width), mode='area')
+
+
+class ColorRestorer:
+    """Automatic color restoration for faded footage (old camcorder/VHS/VCD transfers).
+
+    Three classic corrections, measured on the small source frame and applied to the big output frame,
+    in the order the degradation happens in reverse:
+      1. black point per channel: the 0.5% percentile of each channel is moved to black (faded tapes have
+         lifted, often tinted, blacks); never lifted by more than MAX_BLACK
+      2. white balance: "shades of gray" (Minkowski p=6) estimate of the remaining color cast, removed with
+         per-channel gains whose geometric mean is 1 (brightness unchanged, only the cast)
+      3. white point: the 99.5% luminance percentile is moved to white; never pulled below MIN_WHITE so a
+         dark scene is not forced to full contrast
+    plus a fixed saturation boost proportional to the strength.
+    The measurements are smoothed over time with an exponential moving average (so the picture does not
+    flicker) and reset at scene cuts, where a visible jump is expected anyway. `strength` 0..1 blends the
+    corrected frame with the original.
+    """
+
+    MAX_GAIN = 1.5
+    MAX_BLACK = 0.25
+    MIN_WHITE = 0.65
+
+    def __init__(self, strength: float, smoothing: float = 0.1, cut_threshold: float = 0.25,
+                 saturation_boost: float = 0.4):
+        self.strength = float(max(0.0, min(1.0, strength)))
+        self.smoothing = float(smoothing)
+        self.cut_threshold = float(cut_threshold)
+        self.saturation = 1.0 + saturation_boost * self.strength
+        self.black = None         # [1,3,1,1]
+        self.gain = None          # [1,3,1,1]
+        self.white = None         # float
+        self.prev_thumb = None
+        self.cuts = 0
+
+    @staticmethod
+    def _measure(src: torch.Tensor):
+        # Sub-sample to at most ~1M pixels: torch.quantile has an input size limit and this is plenty.
+        step = max(1, int(round((src.shape[-1] * src.shape[-2] / 1e6) ** 0.5)))
+        x = src[..., ::step, ::step].float().clamp(0, 1)
+        flat = x.flatten(2)                                                           # [1,3,N]
+        black = torch.quantile(flat, 0.005, dim=2).clamp(0, ColorRestorer.MAX_BLACK).view(1, 3, 1, 1)
+        x = (x - black).clamp_min(0)
+        p6 = x.pow(6).mean((2, 3), keepdim=True).pow(1.0 / 6).clamp_min(1e-4)       # [1,3,1,1]
+        gain = (p6.mean() / p6).clamp(1.0 / ColorRestorer.MAX_GAIN, ColorRestorer.MAX_GAIN)
+        gain = gain / gain.prod().pow(1.0 / 3)
+        white = float(torch.quantile(_luma(x * gain).flatten(), 0.995))
+        white = min(1.0, max(white, ColorRestorer.MIN_WHITE - float(black.mean())))
+        return black, gain, white
+
+    def update(self, src: torch.Tensor) -> None:
+        """Measure the source frame and update the smoothed correction parameters."""
+        thumb = _thumbnail(src)
+        is_cut = self.prev_thumb is not None and float((thumb - self.prev_thumb).abs().mean()) > self.cut_threshold
+        self.prev_thumb = thumb
+        if is_cut:
+            self.cuts += 1
+        black, gain, white = self._measure(src)
+        if self.gain is None or is_cut:
+            self.black, self.gain, self.white = black, gain, white
+        else:
+            a = self.smoothing
+            self.black = self.black * (1 - a) + black * a
+            self.gain = self.gain * (1 - a) + gain * a
+            self.white = self.white * (1 - a) + white * a
+
+    def apply(self, x: torch.Tensor) -> torch.Tensor:
+        if self.gain is None or self.strength <= 0:
+            return x
+        fixed = (x - self.black.to(x.device, x.dtype)).clamp_min(0) * self.gain.to(x.device, x.dtype)
+        fixed = fixed / max(self.white, 1e-3)
+        if self.saturation != 1.0:
+            y = _luma(fixed)
+            fixed = y + (fixed - y) * self.saturation
+        fixed = fixed.clamp_(0, 1)
+        if self.strength < 1.0:
+            fixed = x * (1.0 - self.strength) + fixed * self.strength
+        return fixed
+
+    def __call__(self, out: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
+        self.update(src)
+        return self.apply(out)
+
+
 # ----------------------------------------------------------------------------- temporal blend
 
 class TemporalBlender:
@@ -272,10 +448,7 @@ class TemporalBlender:
 
     @staticmethod
     def _thumbnail(src: torch.Tensor) -> torch.Tensor:
-        h, w = src.shape[-2:]
-        th = max(1, round(64 * h / w))
-        # Tiny tensor; computed on the CPU because 'area' resizing is not implemented everywhere (MPS).
-        return F.interpolate(src.mean(1, keepdim=True).cpu(), size=(th, 64), mode='area')
+        return _thumbnail(src)
 
     def __call__(self, out: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
         thumb = self._thumbnail(src)
@@ -365,10 +538,19 @@ def _preview(x: torch.Tensor, max_side: int = 512) -> np.ndarray:
 
 
 def describe_run(info: VideoInfo, options: VideoUpscaleOptions, out_w: int, out_h: int) -> str:
-    total = info.estimated_total_frames
-    return (f'{info.width}x{info.height} @ {float(info.fps):.3f} fps, {total if total else "?"} frames'
+    total = info.estimated_frames(options.start, options.duration)
+    src = f'{info.width}x{info.height}'
+    if info.has_non_square_pixels:
+        src = f'{info.stored_width}x{info.stored_height} (SAR {info.sar}, processed as {src})'
+    trim = f', from {options.start:.2f}s' if options.start else ''
+    trim += f' for {options.duration:.2f}s' if options.duration else ''
+    repair = ', repair ' + '+'.join(n for n, on in (('glitches', options.repair_glitches),
+                                                     ('freezes', options.repair_freezes)) if on) \
+        if (options.repair_glitches or options.repair_freezes) else ''
+    return (f'{src} @ {float(info.fps):.3f} fps, {total if total else "?"} frames{trim}'
             f' -> {out_w}x{out_h}, model {options.model_name}, color fix {options.color_fix},'
-            f' temporal blend {options.temporal_blend}, face enhance {options.face_enhance}, {options.codec} crf {options.crf}')
+            f' color restore {options.color_restore}, temporal blend {options.temporal_blend},'
+            f' face enhance {options.face_enhance}{repair}, {options.codec} crf {options.crf}')
 
 
 def upscale_video(input_path: str, output_path: str, options: VideoUpscaleOptions,
@@ -407,29 +589,42 @@ def upscale_video(input_path: str, output_path: str, options: VideoUpscaleOption
     print(f'[Video Upscale] {describe_run(info, options, out_w, out_h)}')
 
     blender = TemporalBlender(options.temporal_blend, options.scene_cut_threshold) if options.temporal_blend > 0 else None
+    restorer = ColorRestorer(options.color_restore, cut_threshold=options.scene_cut_threshold) \
+        if options.color_restore > 0 else None
     faces = FaceEnhancer(device, options.face_strength) if options.face_enhance else None
+    repair = GlitchRepair() if options.repair_glitches else None
     tile_state = TileState(options.tile, options.tile_overlap)
-    total = info.estimated_total_frames
+    trim_start = max(0.0, float(options.start or 0.0))
+    trim_duration = float(options.duration) if options.duration and options.duration > 0 else None
+    total = info.estimated_frames(trim_start, trim_duration)
 
     start = time.perf_counter()
     last_preview = 0.0
-    frames = iter_frames(input_path, info)
+    frames = iter_frames(input_path, info, start=trim_start, duration=trim_duration,
+                         repair_freezes=options.repair_freezes)
     try:
         with FrameWriter(output_path, out_w, out_h, info.fps,
                          audio_source=input_path if info.has_audio else None, audio_codec=info.audio_codec,
-                         codec=options.codec, crf=options.crf, preset=options.preset) as writer, \
+                         codec=options.codec, crf=options.crf, preset=options.preset,
+                         start=trim_start, duration=trim_duration) as writer, \
                 torch.inference_mode():
-            for i, frame in enumerate(frames):
+            prev_src = None
+            for i, (frame, next_frame) in enumerate(_with_lookahead(frames)):
                 if should_stop is not None and should_stop():
                     raise VideoUpscaleCancelled()
 
                 src = _from_uint8(frame, device)
+                if repair is not None:
+                    next_src = _from_uint8(next_frame, device) if next_frame is not None else None
+                    src, prev_src = repair(prev_src, src, next_src), src
                 if run_sr:
                     out = sr_frame(model, scale, src, tile_state)
                     out = resize_to_target(out, out_w, out_h)
                     out = apply_color_fix(options.color_fix, out, src)
                 else:
                     out = resize_to_target(src, out_w, out_h)
+                if restorer is not None:
+                    out = restorer(out, src)
                 if faces is not None:
                     out = _from_uint8(faces(_to_uint8(out)), device)
                 if blender is not None:
@@ -446,6 +641,9 @@ def upscale_video(input_path: str, output_path: str, options: VideoUpscaleOption
                         preview = _preview(out)
                         last_preview = elapsed
                     progress_cb(done, total, eta, preview)
+            if writer.frames_written == 0:
+                raise VideoUpscaleError('No frames were decoded. If you set a start time, make sure it is '
+                                        'inside the video.')
     except VideoUpscaleCancelled:
         print('[Video Upscale] Cancelled.')
         raise
@@ -453,6 +651,9 @@ def upscale_video(input_path: str, output_path: str, options: VideoUpscaleOption
         frames.close()
 
     elapsed = time.perf_counter() - start
+    if repair is not None:
+        print(f'[Video Upscale] Glitch repair touched {repair.frames_touched} frames '
+              f'({repair.frames_replaced} replaced entirely).')
     print(f'[Video Upscale] Done: {writer.frames_written} frames in {elapsed:.1f}s '
           f'({writer.frames_written / max(elapsed, 1e-6):.2f} fps) -> {output_path}')
     return output_path

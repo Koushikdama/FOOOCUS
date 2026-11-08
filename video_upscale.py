@@ -5,6 +5,7 @@ Upscale a video frame by frame with Fooocus's super-resolution models (standalon
 Examples:
     python video_upscale.py input.mp4
     python video_upscale.py input.mp4 --out out_4k.mp4 --target 4K --face-enhance
+    python video_upscale.py old_tape.mp4 --color-restore 0.7 --start 60 --duration 20   # test 20 s of a faded tape
     python video_upscale.py input.mp4 --model RealESRGAN_x2plus.pth --tile 0 --preset fast -- --always-high-vram
     python video_upscale.py --list-models
 
@@ -33,6 +34,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--target', default='4K', choices=['4K', '1080p', '2x', '4x'])
     p.add_argument('--color-fix', default='wavelet', choices=['wavelet', 'adain', 'none'],
                    help='keep the colors of the source frames (default: wavelet)')
+    p.add_argument('--color-restore', type=float, default=0.0, metavar='STRENGTH',
+                   help='0..1 restore faded/old footage: white balance, levels and saturation, temporally '
+                        'smoothed (0 = keep the source colors; try 0.7 for old camcorder/VHS tapes)')
+    p.add_argument('--start', type=float, default=0.0, metavar='SECONDS', help='skip the first SECONDS of the video')
+    p.add_argument('--duration', type=float, default=0.0, metavar='SECONDS',
+                   help='process only SECONDS of video (0 = to the end); handy to test settings on a short section')
+    p.add_argument('--repair-glitches', action='store_true',
+                   help='damaged disc/tape: replace corrupted blocks and garbage frames using the neighbouring frames')
+    p.add_argument('--repair-freezes', action='store_true',
+                   help='motion-interpolate short runs of repeated (stuck) frames; slow for HD sources')
     p.add_argument('--temporal-blend', type=float, default=0.25,
                    help='0..1 blend with the previous output frame on static pixels to reduce flicker (0 = off)')
     p.add_argument('--scene-cut-threshold', type=float, default=0.25)
@@ -108,7 +119,9 @@ def main() -> int:
         model_name=ns.model, target=ns.target, color_fix=ns.color_fix, temporal_blend=ns.temporal_blend,
         scene_cut_threshold=ns.scene_cut_threshold, face_enhance=ns.face_enhance, face_strength=ns.face_strength,
         codec=ns.codec, crf=ns.crf, preset=ns.preset, fp16=ns.fp16, tile=ns.tile, tile_overlap=ns.tile_overlap,
-        force_sr=ns.force_sr)
+        force_sr=ns.force_sr, color_restore=ns.color_restore, start=ns.start,
+        duration=ns.duration if ns.duration > 0 else None,
+        repair_glitches=ns.repair_glitches, repair_freezes=ns.repair_freezes)
 
     def progress(done, total, eta, preview):
         if total:

@@ -1,6 +1,7 @@
 # 2.6.0
 
 * Add Video Upscale tab (Input Image -> Video Upscale): frame-by-frame super-resolution to 4K / 1080p / 2x / 4x with wavelet color fix, motion-aware temporal blending and optional GFPGAN face restoration, see [readme](readme.md#video-upscale)
+* Video Upscale: add "Restore Faded Colors" (temporally smoothed white balance, levels and saturation for old footage), "Repair Glitches" (temporal dropout repair for damaged discs/tapes), "Repair Freezes" (motion interpolation of stuck frames), Start/Duration trimming, and correct handling of non-square pixels (VCD/DVD sources)
 * Add `video_upscale.py` command line script for the same pipeline (useful on Colab)
 * Add config keys `default_video_*`, `path_face_restoration` and argument `--disable-video-upscale`
 * Add `ffmpeg` to the Docker image; the Video Upscale feature needs the `ffmpeg` binary on PATH
